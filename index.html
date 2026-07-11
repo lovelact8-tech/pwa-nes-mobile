@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#05070d" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+    <title>PWA NES Mobile</title>
+  </head>
+  <body>
+    <div id="app">
+      <section id="landing" class="landing">
+        <div class="card">
+          <h1>PWA NES</h1>
+          <p>手机版 NES 模拟器。选择你自己的 .nes 文件即可开始。</p>
+          <label class="fileBtn">
+            选择 NES 游戏
+            <input id="romInput" type="file" accept=".nes,application/octet-stream" />
+          </label>
+          <button id="demoBtn" class="secondary">只进入手柄测试界面</button>
+          <p class="hint">新版：按钮区域加大，A/B 不再跑到屏幕外；声音改成 iPhone 本地网页也能用的方式。</p>
+        </div>
+      </section>
+
+      <section id="game" class="game hidden">
+        <div class="topHud">
+          <button id="menuBtn">菜单</button>
+          <span id="statusText">未加载游戏</span>
+          <button id="settingsBtn">设置</button>
+          <button id="soundBtn">声音</button>
+          <button id="pauseBtn">暂停</button>
+        </div>
+
+        <div id="screenWrap" class="screenWrap">
+          <canvas id="screen" width="256" height="240"></canvas>
+          <button id="fullscreenBtn" class="fullscreenBtn" aria-label="放大横屏" title="放大横屏">⛶</button>
+        </div>
+
+        <div id="controller" class="controller">
+          <div class="leftZone">
+            <div id="dpad" class="dpad" aria-label="方向键">
+              <div class="padVisual up">▲</div>
+              <div class="padVisual left">◀</div>
+              <div class="padVisual center"></div>
+              <div class="padVisual right">▶</div>
+              <div class="padVisual down">▼</div>
+              <div class="dpadTouch"></div>
+            </div>
+          </div>
+
+          <div class="middleZone">
+            <button class="pill" data-btn="SELECT">SELECT</button>
+            <button class="pill" data-btn="START">START</button>
+          </div>
+
+          <div class="rightZone">
+            <button class="round b" data-btn="B">B</button>
+            <button class="round a" data-btn="A">A</button>
+            <button class="round small tb" data-btn="TURBO_B">连 B</button>
+            <button class="round small ta" data-btn="TURBO_A">连 A</button>
+          </div>
+        </div>
+      </section>
+
+      <dialog id="menuDialog">
+        <h2>菜单</h2>
+        <label class="fileBtn compact">
+          换一个 NES 文件
+          <input id="romInput2" type="file" accept=".nes,application/octet-stream" />
+        </label>
+        <button id="resumeBtn">继续游戏</button>
+        <button id="saveStateBtn">保存游戏</button>
+        <button id="loadStateBtn">加载游戏</button>
+        <button id="netHostBtn">创建联机房间</button>
+        <button id="netCopyBtn">复制邀请链接</button>
+        <button id="netLeaveBtn">断开联机</button>
+        <input id="netLinkInput" class="netLink" type="text" readonly />
+        <p id="netStatusText" class="smallText">未联机</p>
+        <button id="resetBtn">重启当前游戏</button>
+        <button id="closeMenuBtn">关闭</button>
+        <p class="smallText">建议：Safari 打开后“分享 → 添加到主屏幕”，按钮空间会比浏览器里更大。</p>
+      </dialog>
+
+      <dialog id="settingsDialog">
+        <h2>设置</h2>
+        <button id="layoutEditBtn">调整按键位置</button>
+        <button id="resetLayoutBtn">重置按键位置</button>
+        <button id="closeSettingsBtn">关闭</button>
+        <p id="settingsModeText" class="smallText">开启后可拖动虚拟按键，关闭后恢复游戏操作。</p>
+      </dialog>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

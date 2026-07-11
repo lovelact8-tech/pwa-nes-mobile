@@ -1,0 +1,20 @@
+{
+  "name": "pwa-nes-mobile",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "jsnes": "^2.1.0",
+    "peerjs": "^1.5.5",
+    "vite": "^8.1.3"
+  }
+}
