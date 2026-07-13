@@ -9,8 +9,10 @@ const FRAMEBUFFER_SIZE = SCREEN_WIDTH * SCREEN_HEIGHT;
 const FRAME_MS = 1000 / 60;
 const MAX_FRAME_DELTA_MS = FRAME_MS * 3;
 const MAX_PEER_QUEUE_SIZE = 32;
-const NET_INPUT_DELAY_FRAMES = 4;
-const NET_CLOCK_INTERVAL_MS = 500;
+// Keep only one frame of buffering. Four frames made the guest visibly trail
+// the host even on a LAN; the relay/PeerJS transport already queues packets.
+const NET_INPUT_DELAY_FRAMES = 1;
+const NET_CLOCK_INTERVAL_MS = 100;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -1336,8 +1338,8 @@ function loop(timestamp) {
   if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
     const estimatedHostFrame = hostClockFrame + (timestamp - hostClockReceivedAt) / FRAME_MS;
     const frameDifference = estimatedHostFrame - gameFrame;
-    if (frameDifference > 1.5) elapsed += Math.min(2, Math.floor(frameDifference)) * FRAME_MS;
-    if (frameDifference < -1.5) elapsed = Math.max(0, elapsed - FRAME_MS);
+    if (frameDifference > 0.75) elapsed += Math.min(3, Math.max(1, Math.floor(frameDifference))) * FRAME_MS;
+    if (frameDifference < -0.75) elapsed = Math.max(0, elapsed - FRAME_MS);
   }
 
   while (elapsed >= FRAME_MS && frames < 3) {
