@@ -43,6 +43,8 @@ const resetBtn = document.querySelector('#resetBtn');
 const saveStateBtn = document.querySelector('#saveStateBtn');
 const loadStateBtn = document.querySelector('#loadStateBtn');
 const netHostBtn = document.querySelector('#netHostBtn');
+const relayHostBtn = document.querySelector('#relayHostBtn');
+const relayUrlInput = document.querySelector('#relayUrlInput');
 const netCopyBtn = document.querySelector('#netCopyBtn');
 const netLeaveBtn = document.querySelector('#netLeaveBtn');
 const netLinkInput = document.querySelector('#netLinkInput');
@@ -79,11 +81,16 @@ const localSourceStates = { keyboard: new Set(), dpad: new Set(), action: new Se
 let localPlayer = 1;
 let remotePlayer = 2;
 let networkRole = 'offline';
+let networkTransport = 'peer';
 let roomId = '';
 let peer = null;
 let peerConnection = null;
 let peerReady = false;
 let peerConnected = false;
+let relaySocket = null;
+let relayReady = false;
+let relayServerUrl = '';
+let relayPendingRomName = '';
 let peerPendingMessages = [];
 let peerRomSent = false;
 let pendingPeerRomData = null;
@@ -96,6 +103,7 @@ let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
+const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
 
 let audioCtx = null;
 let scriptNode = null;
@@ -289,6 +297,13 @@ function getInviteUrl() {
   const url = new URL(window.location.href);
   url.searchParams.set('room', roomId);
   url.searchParams.delete('host');
+  if (networkTransport === 'relay' && relayServerUrl) {
+    url.searchParams.set('transport', 'relay');
+    url.searchParams.set('relay', relayServerUrl);
+  } else {
+    url.searchParams.delete('transport');
+    url.searchParams.delete('relay');
+  }
   return url.toString();
 }
 
@@ -365,8 +380,36 @@ function applyRemoteButtons(buttons) {
   setPlayerButtons(remotePlayer, new Set(buttons || []));
 }
 
+function isTransportOpen() {
+  if (networkTransport === 'relay') {
+    return relaySocket?.readyState === WebSocket.OPEN && peerConnected;
+  }
+  return Boolean(peerConnection?.open);
+}
+
+function toStandaloneArrayBuffer(value) {
+  if (value instanceof ArrayBuffer) return value;
+  if (ArrayBuffer.isView(value)) {
+    return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+  }
+  return new Uint8Array(value || []).buffer;
+}
+
+function sendTransportMessage(message) {
+  if (networkTransport === 'relay') {
+    if (message.type === 'rom') {
+      relaySocket.send(JSON.stringify({ __nes: 'rom', name: message.name || 'NES 游戏' }));
+      relaySocket.send(toStandaloneArrayBuffer(message.data));
+      return;
+    }
+    relaySocket.send(JSON.stringify(message));
+    return;
+  }
+  peerConnection.send(message);
+}
+
 function sendPeerMessage(message) {
-  if (!peerConnection || !peerConnection.open) {
+  if (!isTransportOpen()) {
     if (message.type === 'state' || message.type === 'clock') {
       peerPendingMessages = peerPendingMessages.filter((pending) => pending.type !== message.type);
     }
@@ -378,17 +421,17 @@ function sendPeerMessage(message) {
     return;
   }
   try {
-    peerConnection.send(message);
+    sendTransportMessage(message);
   } catch (error) {
     console.warn(error);
   }
 }
 
 function flushPeerQueue() {
-  if (!peerConnection || !peerConnection.open) return;
+  if (!isTransportOpen()) return;
   while (peerPendingMessages.length) {
     try {
-      peerConnection.send(peerPendingMessages.shift());
+      sendTransportMessage(peerPendingMessages.shift());
     } catch (error) {
       console.warn(error);
       break;
@@ -440,9 +483,10 @@ function applyPeerRom(romData, name = 'NES 游戏') {
 
 function updateNetworkButtons() {
   const active = networkRole !== 'offline';
-  if (netHostBtn) netHostBtn.textContent = active && networkRole === 'host' ? '房间已创建' : '创建联机房间';
+  if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间';
+  if (relayHostBtn) relayHostBtn.textContent = networkRole === 'host' && networkTransport === 'relay' && relayReady ? '私有房间已创建' : '创建私有中继房间';
   if (netLeaveBtn) netLeaveBtn.disabled = !active;
-  if (netCopyBtn) netCopyBtn.disabled = !roomId;
+  if (netCopyBtn) netCopyBtn.disabled = !roomId || (networkTransport === 'peer' ? !peerReady : !relayReady);
 }
 
 function teardownPeerConnection(finalStatus = '') {
@@ -454,7 +498,8 @@ function teardownPeerConnection(finalStatus = '') {
   scheduledNetworkInputs = [];
   hostClockFrame = null;
   lastNetworkClockAt = 0;
-  setNetworkText(finalStatus || (networkRole === 'host' ? '房间已创建，等待加入' : networkRole === 'guest' ? '已断开联机' : '未联机'));
+  const waitingText = networkTransport === 'relay' ? '私有房间已创建，等待加入' : '房间已创建，等待加入';
+  setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
 }
 
@@ -463,6 +508,64 @@ function teardownPeer() {
   peer?.destroy?.();
   peer = null;
   peerReady = false;
+  if (relaySocket) {
+    relaySocket.onclose = null;
+    relaySocket.onerror = null;
+    relaySocket.close();
+  }
+  relaySocket = null;
+  relayReady = false;
+  relayPendingRomName = '';
+}
+
+function markNetworkConnected() {
+  if (peerConnected) return;
+  peerConnected = true;
+  flushPeerQueue();
+  setNetworkText(networkRole === 'host' ? '2P 已连接' : '已加入房间，等待 1P 选择游戏');
+  updateNetworkButtons();
+  if (networkRole === 'host' && lastRomData && !peerRomSent) {
+    sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
+    peerRomSent = true;
+    sendPeerSnapshot();
+  }
+}
+
+function handleNetworkMessage(message) {
+  if (!message || typeof message !== 'object') return;
+  if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
+    const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
+    scheduleNetworkInput(message.player, message.buttons, frame);
+    sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
+    return;
+  }
+  if (message.type === 'input' && networkRole === 'guest') {
+    scheduleNetworkInput(message.player, message.buttons, message.frame);
+    return;
+  }
+  if (message.type === 'clock' && networkRole === 'guest') {
+    hostClockFrame = Number(message.frame) || 0;
+    hostClockReceivedAt = performance.now();
+    return;
+  }
+  if (message.type === 'rom' && networkRole === 'guest') {
+    applyPeerRom(message.data, message.name || 'NES 游戏');
+    peerRomSent = true;
+    return;
+  }
+  if (message.type === 'state' && nes && networkRole === 'guest') {
+    try {
+      suppressNetworkBroadcast = true;
+      nes.fromJSON(message.state);
+      gameFrame = Number(message.frame) || 0;
+      scheduledNetworkInputs = [];
+      syncButtonVisuals();
+    } catch (error) {
+      console.warn(error);
+    } finally {
+      suppressNetworkBroadcast = false;
+    }
+  }
 }
 
 function configurePeerConnection(connection) {
@@ -472,52 +575,9 @@ function configurePeerConnection(connection) {
   }, 12000);
   connection.on('open', () => {
     clearTimeout(connectionTimeout);
-    peerConnected = true;
-    flushPeerQueue();
-    setNetworkText(networkRole === 'host' ? '2P 已连接' : '已加入房间，等待 1P 选择游戏');
-    updateNetworkButtons();
-    if (networkRole === 'host' && lastRomData && !peerRomSent) {
-      sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
-      peerRomSent = true;
-      sendPeerSnapshot();
-    }
+    markNetworkConnected();
   });
-  connection.on('data', (message) => {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
-      const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
-      scheduleNetworkInput(message.player, message.buttons, frame);
-      sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
-      return;
-    }
-    if (message.type === 'input' && networkRole === 'guest') {
-      scheduleNetworkInput(message.player, message.buttons, message.frame);
-      return;
-    }
-    if (message.type === 'clock' && networkRole === 'guest') {
-      hostClockFrame = Number(message.frame) || 0;
-      hostClockReceivedAt = performance.now();
-      return;
-    }
-    if (message.type === 'rom' && networkRole === 'guest') {
-      applyPeerRom(message.data, message.name || 'NES 游戏');
-      peerRomSent = true;
-      return;
-    }
-    if (message.type === 'state' && nes && networkRole === 'guest') {
-      try {
-        suppressNetworkBroadcast = true;
-        nes.fromJSON(message.state);
-        gameFrame = Number(message.frame) || 0;
-        scheduledNetworkInputs = [];
-        syncButtonVisuals();
-      } catch (error) {
-        console.warn(error);
-      } finally {
-        suppressNetworkBroadcast = false;
-      }
-    }
-  });
+  connection.on('data', handleNetworkMessage);
   connection.on('close', () => {
     clearTimeout(connectionTimeout);
     teardownPeerConnection();
@@ -532,10 +592,10 @@ function configurePeerConnection(connection) {
 function generateRoomId() {
   try {
     if (typeof crypto?.randomUUID === 'function') {
-      return crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+      return crypto.randomUUID().replaceAll('-', '').slice(0, 24);
     }
     if (typeof crypto?.getRandomValues === 'function') {
-      const bytes = new Uint8Array(8);
+      const bytes = new Uint8Array(12);
       crypto.getRandomValues(bytes);
       return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
     }
@@ -563,7 +623,8 @@ function createPeerRoom(nextRoomId) {
   nextRoomId ||= generateRoomId();
   teardownPeer();
   roomId = nextRoomId;
-  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'host', roomId }));
+  networkTransport = 'peer';
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'host', roomId, transport: 'peer' }));
   networkRole = 'host';
   localPlayer = 1;
   remotePlayer = 2;
@@ -598,7 +659,8 @@ function joinPeerRoom(nextRoomId) {
   if (!nextRoomId) return;
   teardownPeer();
   roomId = nextRoomId;
-  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'guest', roomId }));
+  networkTransport = 'peer';
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'guest', roomId, transport: 'peer' }));
   networkRole = 'guest';
   localPlayer = 2;
   remotePlayer = 1;
@@ -619,17 +681,129 @@ function joinPeerRoom(nextRoomId) {
   });
 }
 
+function normalizeRelayUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('请先填写 Tailscale 私有中继地址');
+  const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+  if (url.protocol === 'https:') url.protocol = 'wss:';
+  if (url.protocol === 'http:') url.protocol = 'ws:';
+  const localHost = ['localhost', '127.0.0.1'].includes(url.hostname);
+  if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && localHost)) {
+    throw new Error('私有中继必须使用 HTTPS/WSS 地址');
+  }
+  url.pathname = '/relay';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function getRelayDisplayUrl(value) {
+  const url = new URL(value);
+  if (url.protocol === 'wss:') url.protocol = 'https:';
+  if (url.protocol === 'ws:') url.protocol = 'http:';
+  url.pathname = '';
+  return url.toString().replace(/\/$/, '');
+}
+
+function handleRelayControl(message) {
+  if (message.__relay === 'ready') {
+    relayReady = true;
+    refreshInviteLink();
+    updateNetworkButtons();
+    if (message.peerConnected) markNetworkConnected();
+    else setNetworkText(networkRole === 'host' ? '私有房间已创建，等待加入' : '已连接私有中继，等待 1P');
+    return true;
+  }
+  if (message.__relay === 'peer-connected') {
+    markNetworkConnected();
+    return true;
+  }
+  if (message.__relay === 'peer-left') {
+    teardownPeerConnection(networkRole === 'host' ? '2P 已离开，等待重新加入' : '1P 已离开房间');
+    return true;
+  }
+  return Boolean(message.__relay);
+}
+
+function handleRelayData(data) {
+  if (data instanceof ArrayBuffer) {
+    if (!relayPendingRomName) return;
+    const name = relayPendingRomName;
+    relayPendingRomName = '';
+    handleNetworkMessage({ type: 'rom', name, data });
+    return;
+  }
+  if (typeof data !== 'string') return;
+  try {
+    const message = JSON.parse(data);
+    if (handleRelayControl(message)) return;
+    if (message.__nes === 'rom') {
+      relayPendingRomName = message.name || 'NES 游戏';
+      return;
+    }
+    handleNetworkMessage(message);
+  } catch (error) {
+    console.warn('无法读取私有中继消息', error);
+  }
+}
+
+function connectRelay(role, nextRoomId, serverUrl) {
+  let socketUrl;
+  try {
+    socketUrl = normalizeRelayUrl(serverUrl);
+  } catch (error) {
+    setNetworkText(error.message || '私有中继地址无效');
+    return;
+  }
+  teardownPeer();
+  networkTransport = 'relay';
+  networkRole = role;
+  roomId = String(nextRoomId || '').trim() || generateRoomId();
+  relayServerUrl = getRelayDisplayUrl(socketUrl);
+  if (relayUrlInput) relayUrlInput.value = relayServerUrl;
+  localStorage.setItem(RELAY_URL_STORAGE_KEY, relayServerUrl);
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role, roomId, transport: 'relay', relayUrl: relayServerUrl }));
+  localPlayer = role === 'host' ? 1 : 2;
+  remotePlayer = role === 'host' ? 2 : 1;
+  const url = new URL(socketUrl);
+  url.searchParams.set('room', roomId);
+  url.searchParams.set('role', role);
+  relaySocket = new WebSocket(url);
+  relaySocket.binaryType = 'arraybuffer';
+  setNetworkText(role === 'host' ? '正在创建私有房间...' : '正在连接私有房间...');
+  refreshInviteLink();
+  updateNetworkButtons();
+  relaySocket.onmessage = (event) => handleRelayData(event.data);
+  relaySocket.onerror = () => setNetworkText('私有中继连接失败：请确认 Tailscale 已开启且服务器在线');
+  relaySocket.onclose = (event) => {
+    relayReady = false;
+    const reason = event.reason ? `：${event.reason}` : '';
+    teardownPeerConnection(`私有中继已断开${reason}`);
+  };
+}
+
+function createRelayRoom(nextRoomId, serverUrl) {
+  connectRelay('host', nextRoomId || generateRoomId(), serverUrl);
+}
+
+function joinRelayRoom(nextRoomId, serverUrl) {
+  if (!nextRoomId) return;
+  connectRelay('guest', nextRoomId, serverUrl);
+}
+
 function restoreNetworkRoom() {
   const params = new URLSearchParams(window.location.search);
   const nextRoom = params.get('room');
   if (nextRoom) {
-    joinPeerRoom(nextRoom);
+    if (params.get('transport') === 'relay') joinRelayRoom(nextRoom, params.get('relay'));
+    else joinPeerRoom(nextRoom);
     return;
   }
   try {
     const saved = JSON.parse(localStorage.getItem(NETWORK_STORAGE_KEY) || 'null');
     if (saved?.role === 'host' && saved.roomId) {
-      createPeerRoom(saved.roomId);
+      if (saved.transport === 'relay' && saved.relayUrl) createRelayRoom(saved.roomId, saved.relayUrl);
+      else createPeerRoom(saved.roomId);
       return;
     }
   } catch (error) {
@@ -1045,6 +1219,13 @@ netHostBtn.addEventListener('click', () => {
   createPeerRoom();
   refreshInviteLink();
 });
+relayHostBtn.addEventListener('click', () => {
+  createRelayRoom(undefined, relayUrlInput?.value);
+});
+relayUrlInput.addEventListener('change', () => {
+  const value = relayUrlInput.value.trim();
+  if (value) localStorage.setItem(RELAY_URL_STORAGE_KEY, value);
+});
 netCopyBtn.addEventListener('click', async () => {
   const url = getInviteUrl();
   if (!url) return;
@@ -1062,6 +1243,7 @@ netLeaveBtn.addEventListener('click', () => {
   teardownPeer();
   roomId = '';
   networkRole = 'offline';
+  networkTransport = 'peer';
   localStorage.removeItem(NETWORK_STORAGE_KEY);
   setNetworkText('未联机');
   refreshInviteLink();
@@ -1474,6 +1656,7 @@ readControlOffsets();
 applyControlOffsets();
 updateSoundButton();
 updateFullscreenButton();
+relayUrlInput.value = localStorage.getItem(RELAY_URL_STORAGE_KEY) || '';
 restoreNetworkRoom();
 
 if ('serviceWorker' in navigator) {
