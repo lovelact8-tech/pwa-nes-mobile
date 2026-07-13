@@ -621,7 +621,6 @@ function markNetworkConnected() {
   if (networkRole === 'host' && lastRomData && !peerRomSent) {
     sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
     peerRomSent = true;
-    sendPeerSnapshot();
   }
 }
 
@@ -1304,7 +1303,6 @@ function startRom(romData, name = 'NES 游戏') {
     if (networkRole === 'host' && peerConnected && lastRomData) {
       sendPeerMessage({ type: 'rom', name, data: lastRomData });
       peerRomSent = true;
-      sendPeerSnapshot();
     }
     startLoop();
   } catch (error) {
