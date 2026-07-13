@@ -52,6 +52,8 @@ const resetLayoutBtn = document.querySelector('#resetLayoutBtn');
 const closeSettingsBtn = document.querySelector('#closeSettingsBtn');
 const settingsModeText = document.querySelector('#settingsModeText');
 const layoutPresetButtons = document.querySelectorAll('[data-layout-scale]');
+const controlOpacityInput = document.querySelector('#controlOpacityInput');
+const controlOpacityValue = document.querySelector('#controlOpacityValue');
 const dpad = document.querySelector('#dpad');
 const actionZone = document.querySelector('.rightZone');
 const fullscreenBtn = document.querySelector('#fullscreenBtn');
@@ -107,7 +109,9 @@ let audioCount = 0;
 let audioL = null;
 let audioR = null;
 
-const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
+const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v2';
+const LEGACY_CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
+const CONTROL_OPACITY_STORAGE_KEY = 'pwa-nes-control-opacity-v1';
 const SAVE_STATE_STORAGE_KEY = 'pwa-nes-save-state-v1';
 
 function setStatus(text) {
@@ -118,9 +122,19 @@ function getAdjustableControls() {
   return [dpad, ...document.querySelectorAll('[data-btn]')];
 }
 
-function getControlKey(element) {
+function getLayoutProfile() {
+  return document.body.classList.contains('landscape-mode') || window.matchMedia('(orientation: landscape)').matches
+    ? 'landscape'
+    : 'portrait';
+}
+
+function getBaseControlKey(element) {
   if (element === dpad) return 'dpad';
   return `button-${element.dataset.btn}`;
+}
+
+function getControlKey(element) {
+  return `${getLayoutProfile()}:${getBaseControlKey(element)}`;
 }
 
 function normalizeControlOffset(value = {}) {
@@ -134,14 +148,37 @@ function normalizeControlOffset(value = {}) {
 
 function readControlOffsets() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(CONTROL_LAYOUT_STORAGE_KEY) || '{}');
+    const saved = localStorage.getItem(CONTROL_LAYOUT_STORAGE_KEY);
+    const parsed = JSON.parse(saved || '{}');
     if (parsed && typeof parsed === 'object') {
       controlOffsets = Object.fromEntries(
         Object.entries(parsed).map(([key, value]) => [key, normalizeControlOffset(value)])
       );
     }
+    if (!saved) {
+      const legacy = JSON.parse(localStorage.getItem(LEGACY_CONTROL_LAYOUT_STORAGE_KEY) || '{}');
+      if (legacy && typeof legacy === 'object') {
+        for (const [key, value] of Object.entries(legacy)) {
+          controlOffsets[`portrait:${key}`] = normalizeControlOffset(value);
+          controlOffsets[`landscape:${key}`] = normalizeControlOffset(value);
+        }
+        saveControlOffsets();
+      }
+    }
   } catch (error) {
     controlOffsets = {};
+  }
+}
+
+function applyControlOpacity(value) {
+  const percent = Math.max(45, Math.min(100, Number(value) || 90));
+  document.documentElement.style.setProperty('--control-opacity', String(percent / 100));
+  controlOpacityInput.value = String(percent);
+  controlOpacityValue.textContent = `${percent}%`;
+  try {
+    localStorage.setItem(CONTROL_OPACITY_STORAGE_KEY, String(percent));
+  } catch (error) {
+    console.warn(error);
   }
 }
 
@@ -154,6 +191,7 @@ function saveControlOffsets() {
 }
 
 function applyControlOffsets() {
+  const scales = [];
   for (const element of getAdjustableControls()) {
     const key = getControlKey(element);
     const offset = normalizeControlOffset(controlOffsets[key]);
@@ -162,7 +200,12 @@ function applyControlOffsets() {
     element.style.setProperty('--drag-y', `${offset.y}px`);
     element.style.setProperty('--control-scale', `${offset.scale}`);
     element.classList.toggle('selected-control', key === selectedControlKey);
+    scales.push(offset.scale);
   }
+  const commonScale = scales.length && scales.every((scale) => scale === scales[0]) ? scales[0] : null;
+  layoutPresetButtons.forEach((button) => {
+    button.classList.toggle('active', commonScale !== null && Number(button.dataset.layoutScale) === commonScale);
+  });
 }
 
 function selectControl(element) {
@@ -229,7 +272,9 @@ function setLayoutEditMode(enabled) {
   layoutEditMode = enabled;
   document.body.classList.toggle('layout-editing', enabled);
   layoutEditBtn.textContent = enabled ? '完成调整' : '调整按键位置';
-  settingsModeText.textContent = enabled ? '正在调整：拖动按键移动；选中后点上方 −/+ 或双指缩放；点空白自动保存。' : '可调整方向键、A/B、连发和 SELECT/START 的位置与大小；设置会自动保存。';
+  settingsModeText.textContent = enabled
+    ? `正在调整${getLayoutProfile() === 'landscape' ? '横屏' : '竖屏'}布局：拖动按键移动，选中后用 −/+ 或双指缩放，点空白保存。`
+    : '横屏与竖屏布局会分别保存，不会互相影响。';
   if (!enabled) {
     selectedControlKey = null;
     selectedControlElement = null;
@@ -471,6 +516,7 @@ function applyPeerRom(romData, name = 'NES 游戏') {
 function updateNetworkButtons() {
   const active = networkRole !== 'offline';
   if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && peerReady ? '直连房间已创建' : '创建直连房间';
+  if (netHostBtn) netHostBtn.disabled = active;
   if (netLeaveBtn) netLeaveBtn.disabled = !active;
   if (netCopyBtn) netCopyBtn.disabled = !roomId || !peerReady;
 }
@@ -618,6 +664,11 @@ function createPeerRoom(nextRoomId) {
     }
   });
   peer.on('connection', (connection) => {
+    if (peerConnection?.open) {
+      connection.close();
+      setNetworkText('已有 2P 连接，如需更换请先断开联机');
+      return;
+    }
     configurePeerConnection(connection);
   });
   peer.on('error', (error) => {
@@ -701,23 +752,53 @@ function updateFullscreenButton() {
   fullscreenBtn.title = active ? '退出放大' : '放大横屏';
 }
 
+function finishFullscreenTransition() {
+  applyControlOffsets();
+  positionScaleTools();
+  updateFullscreenButton();
+}
+
+async function exitGameFullscreen() {
+  fallbackFullscreen = false;
+  document.body.classList.remove('fullscreen-mode', 'landscape-mode');
+  screen.orientation?.unlock?.();
+  const exit = document.exitFullscreen || document.webkitExitFullscreen;
+  if (getFullscreenElement() && exit) {
+    try {
+      await Promise.resolve(exit.call(document));
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+  finishFullscreenTransition();
+}
+
 async function toggleGameFullscreen() {
   if (document.body.classList.contains('landscape-mode')) {
-    fallbackFullscreen = false;
-    document.body.classList.remove('fullscreen-mode');
-    document.body.classList.remove('landscape-mode');
-    screen.orientation?.unlock?.();
-    updateFullscreenButton();
+    await exitGameFullscreen();
     return;
   }
 
-  fallbackFullscreen = true;
+  try {
+    await requestGameFullscreen();
+    fallbackFullscreen = false;
+  } catch (error) {
+    fallbackFullscreen = true;
+  }
   document.body.classList.add('fullscreen-mode');
   document.body.classList.add('landscape-mode');
 
   const locked = await lockLandscape();
-  updateFullscreenButton();
+  finishFullscreenTransition();
   if (!locked) setStatus('已进入横屏模式');
+}
+
+function handleFullscreenChange() {
+  if (!getFullscreenElement() && !fallbackFullscreen && document.body.classList.contains('landscape-mode')) {
+    document.body.classList.remove('fullscreen-mode', 'landscape-mode');
+    screen.orientation?.unlock?.();
+  }
+  finishFullscreenTransition();
 }
 
 function showGame() {
@@ -1052,27 +1133,46 @@ soundBtn.addEventListener('click', () => {
   }
 });
 
+function closeSettings() {
+  settingsDialog.removeAttribute('open');
+  document.body.classList.remove('settings-open');
+}
+
+function closeDialogFromBackdrop(event) {
+  const dialog = event.currentTarget;
+  if (event.target !== dialog) return;
+  const rect = dialog.getBoundingClientRect();
+  const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+  if (!inside) dialog.close();
+}
+
 settingsBtn.addEventListener('click', () => {
+  releaseAllButtons({ broadcast: true });
   settingsDialog.setAttribute('open', '');
   document.body.classList.add('settings-open');
 });
-closeSettingsBtn.addEventListener('click', () => {
-  settingsDialog.removeAttribute('open');
-  document.body.classList.remove('settings-open');
-});
+closeSettingsBtn.addEventListener('click', closeSettings);
 layoutEditBtn.addEventListener('click', () => {
   const nextMode = !layoutEditMode;
   setLayoutEditMode(nextMode);
   if (nextMode) {
-    settingsDialog.removeAttribute('open');
-    document.body.classList.remove('settings-open');
+    closeSettings();
   }
 });
 resetLayoutBtn.addEventListener('click', resetControlLayout);
 layoutPresetButtons.forEach((button) => {
   button.addEventListener('click', () => applyLayoutScalePreset(button.dataset.layoutScale));
 });
-menuBtn.addEventListener('click', () => menuDialog.showModal());
+controlOpacityInput.addEventListener('input', () => applyControlOpacity(controlOpacityInput.value));
+menuDialog.addEventListener('click', closeDialogFromBackdrop);
+libraryDialog.addEventListener('click', closeDialogFromBackdrop);
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && settingsDialog.hasAttribute('open')) closeSettings();
+});
+menuBtn.addEventListener('click', () => {
+  releaseAllButtons({ broadcast: true });
+  menuDialog.showModal();
+});
 closeMenuBtn.addEventListener('click', () => menuDialog.close());
 resumeBtn.addEventListener('click', () => menuDialog.close());
 resetBtn.addEventListener('click', () => {
@@ -1112,8 +1212,8 @@ fullscreenBtn.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleGameFullscreen();
 });
-document.addEventListener('fullscreenchange', updateFullscreenButton);
-document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('gesturestart', (event) => {
   if (game.contains(event.target)) event.preventDefault();
 }, { passive: false });
@@ -1409,8 +1509,14 @@ function bindDraggableControl(element) {
 }
 
 getAdjustableControls().forEach(bindDraggableControl);
-window.addEventListener('resize', positionScaleTools);
-window.addEventListener('orientationchange', () => window.setTimeout(positionScaleTools, 80));
+window.addEventListener('resize', () => {
+  applyControlOffsets();
+  positionScaleTools();
+});
+window.addEventListener('orientationchange', () => window.setTimeout(() => {
+  applyControlOffsets();
+  positionScaleTools();
+}, 80));
 game.addEventListener('pointerdown', (event) => {
   if (!layoutEditMode) return;
   if (event.target.closest('#dpad, [data-btn], dialog, .topHud')) return;
@@ -1518,6 +1624,7 @@ window.addEventListener('blur', () => {
 window.addEventListener('pagehide', () => releaseAllButtons({ broadcast: true }));
 readControlOffsets();
 applyControlOffsets();
+applyControlOpacity(localStorage.getItem(CONTROL_OPACITY_STORAGE_KEY) || 90);
 updateSoundButton();
 updateFullscreenButton();
 restoreNetworkRoom();

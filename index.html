@@ -14,16 +14,23 @@
     <div id="app">
       <section id="landing" class="landing">
         <div class="card">
+          <div class="brandMark" aria-hidden="true">FC</div>
+          <p class="eyebrow">随时开机 · 支持双人直连</p>
           <h1>PWA NES</h1>
-          <p>手机版 NES 模拟器。选择你自己的 .nes 文件即可开始。</p>
-          <label class="fileBtn">
-            选择 NES 游戏
-            <input id="romInput" type="file" accept=".nes,application/octet-stream" />
-          </label>
-          <button id="libraryBtn" class="secondary">搜索中文游戏库</button>
-          <button id="demoBtn" class="secondary">只进入手柄测试界面</button>
+          <p class="subtitle">为手机重新设计的 NES 模拟器，支持中文游戏库、存档和 WebRTC 双人联机。</p>
+          <div class="landingActions">
+            <label class="fileBtn primaryAction">
+              从本机选择游戏
+              <input id="romInput" type="file" accept=".nes,application/octet-stream" />
+            </label>
+            <button id="libraryBtn" class="secondary">搜索中文游戏库</button>
+            <button id="demoBtn" class="ghostButton">预览虚拟手柄</button>
+          </div>
           <p id="inviteStatusText" class="inviteStatus hidden" role="status"></p>
-          <p class="hint">新版：按钮区域加大，A/B 不再跑到屏幕外；声音改成 iPhone 本地网页也能用的方式。</p>
+          <div class="featureChips" aria-label="功能特点">
+            <span>离线可玩</span><span>即时存档</span><span>自定义手柄</span>
+          </div>
+          <p class="hint">iPhone 建议使用 Safari“添加到主屏幕”，可获得更大的游戏区域。</p>
         </div>
       </section>
 
@@ -67,24 +74,35 @@
         </div>
       </section>
 
-      <dialog id="menuDialog">
+      <dialog id="menuDialog" class="menuDialog">
         <h2>菜单</h2>
-        <label class="fileBtn compact">
-          换一个 NES 文件
-          <input id="romInput2" type="file" accept=".nes,application/octet-stream" />
-        </label>
-        <button id="menuLibraryBtn">搜索中文游戏库</button>
-        <button id="resumeBtn">继续游戏</button>
-        <button id="saveStateBtn">保存游戏</button>
-        <button id="loadStateBtn">加载游戏</button>
-        <button id="netHostBtn">创建直连房间</button>
-        <button id="netCopyBtn">复制邀请链接</button>
-        <button id="netLeaveBtn">断开联机</button>
-        <input id="netLinkInput" class="netLink" type="text" readonly />
-        <p id="netStatusText" class="smallText">未联机</p>
-        <button id="resetBtn">重启当前游戏</button>
-        <button id="closeMenuBtn">关闭</button>
-        <p class="smallText">建议：Safari 打开后“分享 → 添加到主屏幕”，按钮空间会比浏览器里更大。</p>
+        <section class="menuSection">
+          <h3>游戏</h3>
+          <div class="menuGrid">
+            <label class="fileBtn compact">
+              本机游戏
+              <input id="romInput2" type="file" accept=".nes,application/octet-stream" />
+            </label>
+            <button id="menuLibraryBtn">中文游戏库</button>
+            <button id="saveStateBtn">保存进度</button>
+            <button id="loadStateBtn">读取进度</button>
+          </div>
+        </section>
+        <section class="menuSection">
+          <h3>双人直连</h3>
+          <button id="netHostBtn">创建直连房间</button>
+          <div class="menuGrid">
+            <button id="netCopyBtn">复制邀请链接</button>
+            <button id="netLeaveBtn" class="dangerButton">断开联机</button>
+          </div>
+          <input id="netLinkInput" class="netLink" type="text" readonly aria-label="联机邀请链接" />
+          <p id="netStatusText" class="networkStatus" role="status">未联机</p>
+        </section>
+        <section class="menuSection menuFooterActions">
+          <button id="resetBtn" class="dangerButton">重启游戏</button>
+          <button id="resumeBtn">继续游戏</button>
+        </section>
+        <button id="closeMenuBtn" class="ghostButton">关闭菜单</button>
       </dialog>
 
       <dialog id="libraryDialog" class="libraryDialog">
@@ -97,6 +115,11 @@
 
       <dialog id="settingsDialog">
         <h2>设置</h2>
+        <label class="settingRange" for="controlOpacityInput">
+          <span>手柄透明度</span>
+          <output id="controlOpacityValue" for="controlOpacityInput">90%</output>
+        </label>
+        <input id="controlOpacityInput" class="rangeInput" type="range" min="45" max="100" step="5" value="90" />
         <button id="layoutEditBtn">调整按键位置</button>
         <div class="layoutPresetGroup" role="group" aria-label="全局按键大小">
           <span class="smallText">全局按键大小</span>
@@ -108,7 +131,7 @@
         </div>
         <button id="resetLayoutBtn">重置按键位置</button>
         <button id="closeSettingsBtn">关闭</button>
-        <p id="settingsModeText" class="smallText">可调整方向键、A/B、连发和 SELECT/START 的位置与大小；设置会自动保存。</p>
+        <p id="settingsModeText" class="smallText">横屏与竖屏布局会分别保存，不会互相影响。</p>
       </dialog>
     </div>
     <script type="module" src="./src/main.js"></script>
