@@ -31,6 +31,8 @@ const libraryResults = document.querySelector('#libraryResults');
 const closeLibraryBtn = document.querySelector('#closeLibraryBtn');
 const statusText = document.querySelector('#statusText');
 const inviteStatusText = document.querySelector('#inviteStatusText');
+const joinRoomForm = document.querySelector('#joinRoomForm');
+const joinRoomInput = document.querySelector('#joinRoomInput');
 const pauseBtn = document.querySelector('#pauseBtn');
 const soundBtn = document.querySelector('#soundBtn');
 const settingsBtn = document.querySelector('#settingsBtn');
@@ -710,11 +712,42 @@ function joinPeerRoom(nextRoomId) {
   });
 }
 
+function getRoomIdFromInput(value) {
+  const input = String(value || '').trim();
+  if (!input) return '';
+  let candidate = input;
+  try {
+    const url = new URL(input, window.location.href);
+    const roomFromUrl = url.searchParams.get('room');
+    if (roomFromUrl) candidate = roomFromUrl;
+    else if (input.includes('://') || input.includes('?')) return '';
+  } catch (error) {
+    return '';
+  }
+  candidate = candidate.trim();
+  return /^[a-zA-Z0-9_-]{6,128}$/.test(candidate) ? candidate : '';
+}
+
+function enterGuestRoom(nextRoomId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('room', nextRoomId);
+  url.searchParams.delete('host');
+  window.history.replaceState({}, '', url);
+  ensureDemoScreen();
+  setStatus('正在连接 1P 房间...');
+  joinPeerRoom(nextRoomId);
+}
+
 function restoreNetworkRoom() {
   const params = new URLSearchParams(window.location.search);
   const nextRoom = params.get('room');
   if (nextRoom) {
-    joinPeerRoom(nextRoom);
+    const validRoom = getRoomIdFromInput(nextRoom);
+    if (validRoom) enterGuestRoom(validRoom);
+    else {
+      inviteStatusText.textContent = '房间链接无效，请让 1P 重新复制邀请链接';
+      inviteStatusText.classList.remove('hidden');
+    }
     return;
   }
   try {
@@ -1100,6 +1133,17 @@ romInput2.addEventListener('change', (e) => {
 });
 libraryBtn.addEventListener('click', openGameLibrary);
 menuLibraryBtn.addEventListener('click', openGameLibrary);
+joinRoomForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const nextRoom = getRoomIdFromInput(joinRoomInput.value);
+  if (!nextRoom) {
+    inviteStatusText.textContent = '链接无效：请粘贴包含 room 参数的完整邀请链接';
+    inviteStatusText.classList.remove('hidden');
+    joinRoomInput.focus();
+    return;
+  }
+  enterGuestRoom(nextRoom);
+});
 librarySearchInput.addEventListener('input', renderGameLibrary);
 closeLibraryBtn.addEventListener('click', () => libraryDialog.close());
 

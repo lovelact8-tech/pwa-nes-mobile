@@ -20,11 +20,17 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(96,165,250,.
 .fileBtn.compact { margin-bottom: 10px; }
 .secondary { background: rgba(255,255,255,.14); width: 100%; border: 1px solid rgba(255,255,255,.08); }
 .ghostButton { width: 100%; background: transparent !important; border: 1px solid rgba(255,255,255,.14) !important; color: #cbd5e1; }
+.joinRoomForm { margin-top: 16px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,.11); text-align: left; }
+.joinRoomForm > label { display: block; margin-bottom: 7px; color: #dbeafe; font-size: 13px; font-weight: 800; }
+.joinRoomRow { display: grid; grid-template-columns: minmax(0, 1fr) 78px; gap: 8px; }
+.joinRoomRow input { width: 100%; min-width: 0; min-height: 46px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.15); border-radius: 13px; background: rgba(4,9,20,.54); color: #fff; user-select: text; -webkit-user-select: text; touch-action: manipulation; }
+.joinRoomRow input::placeholder { color: #7f8ba0; }
+.joinRoomRow button { width: 100%; min-height: 46px; padding: 10px 12px; border-radius: 13px; }
 .featureChips { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin: 18px 0 12px; }
 .featureChips span { padding: 6px 9px; border-radius: 999px; background: rgba(255,255,255,.075); border: 1px solid rgba(255,255,255,.09); color: #cbd5e1; font-size: 11px; }
 .card .hint { margin: 0; }
 .hint, .smallText { font-size: 13px; color: #aeb9cd !important; }
-.inviteStatus { margin: 14px 0 0 !important; padding: 11px 12px; border-radius: 12px; background: rgba(43,112,255,.16); border: 1px solid rgba(96,165,250,.35); color: #dbeafe !important; font-size: 14px; }
+.inviteStatus { margin: 14px 0 0 !important; padding: 11px 12px; border-radius: 12px; background: rgba(43,112,255,.16); border: 1px solid rgba(96,165,250,.35); color: #dbeafe !important; font-size: 14px; text-align: left; }
 .game { width: 100vw; height: 100svh; overflow: hidden; background: radial-gradient(circle at 50% 22%, #111827, #05070d 64%); padding: calc(env(safe-area-inset-top) + 6px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px); display: grid; grid-template-rows: 40px minmax(0, 1fr) 222px; gap: 8px; }
 body.browser-mode .game { padding-bottom: calc(env(safe-area-inset-bottom) + 78px); grid-template-rows: 40px minmax(120px, 1fr) 218px; }
 .topHud { height: 40px; display: grid; grid-template-columns: 64px minmax(0,1fr) 54px 54px 54px; align-items: center; gap: 6px; color: #cbd5e1; }
