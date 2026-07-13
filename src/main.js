@@ -257,8 +257,8 @@ function positionScaleTools() {
   const tools = ensureScaleTools();
   const rect = selectedControlElement.getBoundingClientRect();
   if (isRotatedLandscapeFallback()) {
-    tools.style.left = `${Math.min(window.innerWidth - 8, rect.right + 44)}px`;
-    tools.style.top = `${rect.top + rect.height / 2}px`;
+    tools.style.left = `${Math.min(window.innerWidth - 44, rect.right + 10)}px`;
+    tools.style.top = `${Math.max(48, Math.min(window.innerHeight - 48, rect.top + rect.height / 2))}px`;
     tools.classList.add('rotated');
   } else {
     tools.style.left = `${rect.left + rect.width / 2}px`;
@@ -1289,6 +1289,19 @@ function getActionButtonsFromPoint(point) {
   const aButton = getActionButton('A');
   const bButton = getActionButton('B');
 
+  if (aButton && bButton) {
+    const aRect = aButton.getBoundingClientRect();
+    const bRect = bButton.getBoundingClientRect();
+    const middleX = (aRect.left + aRect.width / 2 + bRect.left + bRect.width / 2) / 2;
+    const middleY = (aRect.top + aRect.height / 2 + bRect.top + bRect.height / 2) / 2;
+    const buttonRadius = Math.min(aRect.width, aRect.height, bRect.width, bRect.height) / 2;
+    const comboRadius = Math.max(14, Math.min(22, buttonRadius * 0.42));
+    const comboDistance = Math.hypot(point.clientX - middleX, point.clientY - middleY);
+    if (comboDistance <= comboRadius + Math.min(3, touchRadius * 0.12)) {
+      return new Set(['A', 'B']);
+    }
+  }
+
   for (const name of ['A', 'B']) {
     const button = getActionButton(name);
     if (!button) continue;
@@ -1411,6 +1424,7 @@ function bindDraggableControl(element) {
       startY: point.clientY,
       baseX: Number(offset.x) || 0,
       baseY: Number(offset.y) || 0,
+      baseScale: Number(offset.scale) || 1,
     };
     if (pointerId !== null) element.setPointerCapture?.(pointerId);
     element.classList.add('dragging');
@@ -1431,6 +1445,7 @@ function bindDraggableControl(element) {
     controlOffsets[drag.key] = {
       x: Math.round(nextX),
       y: Math.round(nextY),
+      scale: drag.baseScale,
     };
     applyControlOffsets();
     positionScaleTools();

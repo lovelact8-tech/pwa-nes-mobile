@@ -165,16 +165,29 @@ body.landscape-mode .screenWrap{display:grid;place-items:center}
 body.landscape-mode #screen{width:min(100vw,106.6667dvh);height:min(100dvh,93.75vw);object-fit:contain;background:#000}
 @media (orientation:portrait){body.landscape-mode #screen{width:min(100dvh,106.6667dvw);height:min(100dvw,93.75dvh);object-fit:contain}}
 body.landscape-mode dialog[open] { position: fixed; top: 50%; left: 50%; right: auto; bottom: auto; transform: translate(-50%, -50%) !important; width: min(360px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; z-index: 2000; }
-@media (orientation: portrait) { body.landscape-mode dialog[open] { width: min(360px, calc(100dvw - 32px)); max-height: calc(100dvh - 32px); } }
+@media (orientation: portrait) {
+  body.landscape-mode dialog[open] {
+    width: min(430px, calc(100dvh - 24px));
+    max-height: calc(100dvw - 24px);
+    transform: translate(-50%, -50%) rotate(90deg) !important;
+  }
+}
 .layout-editing .selected-control { outline: 3px solid rgba(96,165,250,.95); outline-offset: 7px; }
 body.settings-open::before { content: ""; position: fixed; inset: 0; z-index: 1990; background: rgba(0,0,0,.45); }
 #settingsDialog[open] { position: fixed; top: 50%; left: 50%; right: auto; bottom: auto; transform: translate(-50%, -50%) !important; z-index: 2000; margin: 0; display: block; }
 body.landscape-mode #settingsDialog[open] { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) !important; width: min(360px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); }
-@media (orientation: portrait) { body.landscape-mode #settingsDialog[open] { width: min(360px, calc(100dvw - 32px)); max-height: calc(100dvh - 32px); } }
+@media (orientation: portrait) {
+  body.landscape-mode #settingsDialog[open] {
+    width: min(380px, calc(100dvh - 24px));
+    max-height: calc(100dvw - 24px);
+    transform: translate(-50%, -50%) rotate(90deg) !important;
+  }
+}
 .scaleTools { position: fixed; z-index: 2100; transform: translate(-50%, -100%); display: flex; gap: 8px; padding: 4px; border-radius: 999px; background: rgba(15,23,42,.88); border: 1px solid rgba(255,255,255,.18); box-shadow: 0 10px 28px rgba(0,0,0,.35); }
 .scaleTools button { width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 999px; font-size: 22px; line-height: 1; background: rgba(255,255,255,.16); }
 .scaleTools.hidden { display: none; }
-.scaleTools.rotated{transform:translate(0,-50%)}.pill { background: rgba(38,49,68,.42); color: rgba(220,231,255,.82); box-shadow: inset 0 -3px 0 rgba(0,0,0,.18); border: 1px solid rgba(255,255,255,.10); }
+.scaleTools.rotated { flex-direction: column; transform: translate(0,-50%); }
+.pill { background: rgba(38,49,68,.42); color: rgba(220,231,255,.82); box-shadow: inset 0 -3px 0 rgba(0,0,0,.18); border: 1px solid rgba(255,255,255,.10); }
 .netLink { width: 100%; min-height: 42px; margin: 6px 0 8px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; background: rgba(255,255,255,.08); color: #dce7ff; font-size: 12px; }
 .netLink:focus { outline: 2px solid rgba(43,112,255,.55); outline-offset: 2px; }
 .libraryDialog { width: min(560px, calc(100vw - 24px)); max-height: min(82dvh, 720px); }
