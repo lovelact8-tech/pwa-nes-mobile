@@ -378,7 +378,10 @@ function getLocalMergedButtons() {
 function syncButtonVisuals() {
   const activeButtons = new Set([...buttonStateByPlayer[1], ...buttonStateByPlayer[2]]);
   document.querySelectorAll('[data-btn]').forEach((element) => {
-    element.classList.toggle('active', activeButtons.has(element.dataset.btn));
+    const active = element.dataset.btn === 'AB'
+      ? activeButtons.has('A') && activeButtons.has('B')
+      : activeButtons.has(element.dataset.btn);
+    element.classList.toggle('active', active);
   });
   document.querySelectorAll('.padVisual').forEach((element) => {
     element.classList.remove('active');
@@ -1152,6 +1155,13 @@ settingsBtn.addEventListener('click', () => {
   document.body.classList.add('settings-open');
 });
 closeSettingsBtn.addEventListener('click', closeSettings);
+document.addEventListener('click', (event) => {
+  if (!settingsDialog.hasAttribute('open')) return;
+  if (event.target.closest?.('#settingsDialog, #settingsBtn')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeSettings();
+}, true);
 layoutEditBtn.addEventListener('click', () => {
   const nextMode = !layoutEditMode;
   setLayoutEditMode(nextMode);
@@ -1295,7 +1305,7 @@ function getActionButtonsFromPoint(point) {
     const middleX = (aRect.left + aRect.width / 2 + bRect.left + bRect.width / 2) / 2;
     const middleY = (aRect.top + aRect.height / 2 + bRect.top + bRect.height / 2) / 2;
     const buttonRadius = Math.min(aRect.width, aRect.height, bRect.width, bRect.height) / 2;
-    const comboRadius = Math.max(14, Math.min(22, buttonRadius * 0.42));
+    const comboRadius = Math.max(16, Math.min(24, buttonRadius * 0.46));
     const comboDistance = Math.hypot(point.clientX - middleX, point.clientY - middleY);
     if (comboDistance <= comboRadius + Math.min(3, touchRadius * 0.12)) {
       return new Set(['A', 'B']);
@@ -1329,8 +1339,10 @@ function bindActionZone() {
   if (!actionZone) return;
 
   const start = (event, point, pointerId = null) => {
-    if (layoutEditMode || event.target.closest('[data-btn]')) return;
+    if (layoutEditMode) return;
     const next = getActionButtonsFromPoint(point);
+    const isCombo = next.has('A') && next.has('B');
+    if (event.target.closest('[data-btn]') && !isCombo) return;
     if (!next.size) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1378,6 +1390,7 @@ function bindActionZone() {
 function bindTouchButton(button) {
   const name = button.dataset.btn;
   if (!name) return;
+  const names = name === 'AB' ? ['A', 'B'] : [name];
   let pointerId = null;
 
   button.addEventListener('pointerdown', (event) => {
@@ -1385,14 +1398,14 @@ function bindTouchButton(button) {
     event.preventDefault();
     pointerId = event.pointerId;
     button.setPointerCapture?.(pointerId);
-    localSourceStates.action.add(name);
+    names.forEach((buttonName) => localSourceStates.action.add(buttonName));
     syncLocalPlayerState();
   });
 
   const up = (event) => {
     if (pointerId !== null && event.pointerId !== pointerId) return;
     event.preventDefault();
-    localSourceStates.action.delete(name);
+    names.forEach((buttonName) => localSourceStates.action.delete(buttonName));
     syncLocalPlayerState();
     pointerId = null;
   };

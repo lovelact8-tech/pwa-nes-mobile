@@ -71,6 +71,7 @@ body.landscape-mode .dpad { width: min(39dvh, 174px); height: min(39dvh, 174px);
 .round { position: absolute; border-radius: 999px; padding: 0; background: #334155; box-shadow: inset 0 -5px 0 rgba(0,0,0,.30); color: #fff; transform: translate(var(--drag-x), var(--drag-y)) scale(var(--control-scale)); }
 .round.a, .round.b { width: var(--mainBtn); height: var(--mainBtn); font-size: clamp(24px, 8vw, 40px); }
 .round.b { left: 2%; top: 52px; background: #2563eb; }
+.round.combo { left: 50%; top: 53px; width: min(11vw, 44px); height: min(11vw, 44px); min-width: 38px; min-height: 38px; font-size: 12px; letter-spacing: -.02em; background: rgba(109,40,217,.82); border: 1px solid rgba(255,255,255,.24); transform: translate(calc(-50% + var(--drag-x)), var(--drag-y)) scale(var(--control-scale)); }
 .round.a { right: 2%; top: 18px; background: #be123c; }
 .round.small { width: var(--smallBtn); height: var(--smallBtn); font-size: clamp(11px, 3.3vw, 13px); background: #374151; }
 .round.tb { left: 13%; bottom: 16px; }
@@ -78,9 +79,11 @@ body.landscape-mode .dpad { width: min(39dvh, 174px); height: min(39dvh, 174px);
 button.active, button:active, .padVisual.active { filter: brightness(1.45); }
 .dpad.active, [data-btn].active, [data-btn]:active { opacity: 1; }
 .round.active, .round:active, .pill.active, .pill:active { transform: translate(var(--drag-x), var(--drag-y)) scale(var(--control-scale)); }
+.round.combo.active, .round.combo:active { transform: translate(calc(-50% + var(--drag-x)), var(--drag-y)) scale(var(--control-scale)); }
 .layout-editing .dpad, .layout-editing [data-btn] { outline: 2px dashed rgba(255,255,255,.55); outline-offset: 5px; cursor: grab; opacity: 1; }
 .layout-editing .dpad.dragging, .layout-editing [data-btn].dragging { cursor: grabbing; z-index: 30; filter: brightness(1.25); }
 .layout-editing .pill:active, .layout-editing .round:active, .layout-editing .pill.active, .layout-editing .round.active { transform: translate(var(--drag-x), var(--drag-y)) scale(var(--control-scale)); }
+.layout-editing .round.combo:active, .layout-editing .round.combo.active { transform: translate(calc(-50% + var(--drag-x)), var(--drag-y)) scale(var(--control-scale)); }
 .layout-editing .controller::after { content: "拖动按键调整位置"; position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 10px); transform: translateX(-50%); z-index: 40; padding: 8px 12px; border-radius: 999px; background: rgba(15,23,42,.86); color: #fff; font-size: 13px; pointer-events: none; }
 dialog { width: min(380px, calc(100vw - 24px)); max-height: calc(100dvh - 28px); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; border: 1px solid rgba(255,255,255,.16); border-radius: 24px; background: var(--panel); color: #fff; padding: 20px; box-shadow: 0 26px 90px rgba(0,0,0,.62); }
 dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(3px); }
@@ -114,6 +117,7 @@ dialog button { width: 100%; background: rgba(255,255,255,.13); margin: 5px 0; }
   .rightZone { grid-area: right; height: 100%; --mainBtn: min(21dvh, 82px); --smallBtn: min(16dvh, 58px); }
   .round.b { left: 14%; top: 48%; transform: translate(var(--drag-x), calc(var(--drag-y) - 50%)) scale(var(--control-scale)); }
   .layout-editing .round.b:active, .layout-editing .round.b.active { transform: translate(var(--drag-x), calc(var(--drag-y) - 50%)) scale(var(--control-scale)); }
+  .round.combo, .round.combo.active, .round.combo:active, .layout-editing .round.combo.active, .layout-editing .round.combo:active { left: 54%; top: 37%; width: min(12dvh, 46px); height: min(12dvh, 46px); transform: translate(calc(-50% + var(--drag-x)), calc(-50% + var(--drag-y))) scale(var(--control-scale)); }
   .round.a { right: 12%; top: 30%; }
   .round.tb { left: 19%; bottom: 8%; }
   .round.ta { right: 17%; bottom: 8%; }
@@ -154,6 +158,8 @@ body.landscape-mode .rightZone { position: absolute; right: 0; top: 34px; bottom
 body.landscape-mode .middleZone { position: absolute; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 10px); transform: translateX(-50%); width: auto; height: auto; display: flex; gap: 14px; z-index: 16; }
 body.landscape-mode .fullscreenBtn { z-index: 22; }
 body.landscape-mode .round.b { left: 14%; top: 48%; transform: translate(var(--drag-x), calc(var(--drag-y) - 50%)) scale(var(--control-scale)); }
+body.landscape-mode .round.combo { left: 54%; top: 37%; width: min(12dvh, 46px); height: min(12dvh, 46px); transform: translate(calc(-50% + var(--drag-x)), calc(-50% + var(--drag-y))) scale(var(--control-scale)); }
+body.landscape-mode .round.combo.active, body.landscape-mode .round.combo:active { transform: translate(calc(-50% + var(--drag-x)), calc(-50% + var(--drag-y))) scale(var(--control-scale)); }
 body.landscape-mode .round.a { right: 12%; top: 30%; }
 body.landscape-mode .round.tb { left: 19%; bottom: 8%; }
 body.landscape-mode .round.ta { right: 17%; bottom: 8%; }
