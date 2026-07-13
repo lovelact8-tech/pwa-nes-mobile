@@ -1,0 +1,23 @@
+[Unit]
+Description=PWA NES private WebSocket relay
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pwa-nes-mobile
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=TRUST_PROXY=1
+Environment=ALLOWED_ORIGINS=https://lovelact8-tech.github.io
+ExecStart=/usr/bin/node relay-server/server.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pwa-nes-mobile
+
+[Install]
+WantedBy=multi-user.target

@@ -45,6 +45,7 @@ const resetBtn = document.querySelector('#resetBtn');
 const saveStateBtn = document.querySelector('#saveStateBtn');
 const loadStateBtn = document.querySelector('#loadStateBtn');
 const netHostBtn = document.querySelector('#netHostBtn');
+const relayHostBtn = document.querySelector('#relayHostBtn');
 const netCopyBtn = document.querySelector('#netCopyBtn');
 const netLeaveBtn = document.querySelector('#netLeaveBtn');
 const netLinkInput = document.querySelector('#netLinkInput');
@@ -84,11 +85,15 @@ const localSourceStates = { keyboard: new Set(), dpad: new Set(), action: new Se
 let localPlayer = 1;
 let remotePlayer = 2;
 let networkRole = 'offline';
+let networkTransport = 'peer';
 let roomId = '';
 let peer = null;
 let peerConnection = null;
 let peerReady = false;
 let peerConnected = false;
+let relaySocket = null;
+let relayReady = false;
+let relayPendingRomName = '';
 let peerPendingMessages = [];
 let peerRomSent = false;
 let pendingPeerRomData = null;
@@ -101,6 +106,7 @@ let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
+const RELAY_SERVER_URL = String(import.meta.env.VITE_RELAY_URL || '').trim();
 
 let audioCtx = null;
 let scriptNode = null;
@@ -366,6 +372,8 @@ function getInviteUrl() {
   const url = new URL(window.location.href);
   url.searchParams.set('room', roomId);
   url.searchParams.delete('host');
+  if (networkTransport === 'relay') url.searchParams.set('transport', 'relay');
+  else url.searchParams.delete('transport');
   return url.toString();
 }
 
@@ -445,8 +453,37 @@ function applyRemoteButtons(buttons) {
   setPlayerButtons(remotePlayer, new Set(buttons || []));
 }
 
+function isTransportOpen() {
+  if (networkTransport === 'relay') {
+    return relaySocket?.readyState === WebSocket.OPEN && peerConnected;
+  }
+  return Boolean(peerConnection?.open);
+}
+
+function binaryStringToArrayBuffer(value) {
+  if (value instanceof ArrayBuffer) return value;
+  if (ArrayBuffer.isView(value)) return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+  const text = String(value || '');
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index++) bytes[index] = text.charCodeAt(index) & 0xff;
+  return bytes.buffer;
+}
+
+function sendTransportMessage(message) {
+  if (networkTransport === 'relay') {
+    if (message.type === 'rom') {
+      relaySocket.send(JSON.stringify({ __nes: 'rom', name: message.name || 'NES 游戏' }));
+      relaySocket.send(binaryStringToArrayBuffer(message.data));
+      return;
+    }
+    relaySocket.send(JSON.stringify(message));
+    return;
+  }
+  peerConnection.send(message);
+}
+
 function sendPeerMessage(message) {
-  if (!peerConnection?.open) {
+  if (!isTransportOpen()) {
     if (message.type === 'state' || message.type === 'clock') {
       peerPendingMessages = peerPendingMessages.filter((pending) => pending.type !== message.type);
     }
@@ -458,17 +495,17 @@ function sendPeerMessage(message) {
     return;
   }
   try {
-    peerConnection.send(message);
+    sendTransportMessage(message);
   } catch (error) {
     console.warn(error);
   }
 }
 
 function flushPeerQueue() {
-  if (!peerConnection?.open) return;
+  if (!isTransportOpen()) return;
   while (peerPendingMessages.length) {
     try {
-      peerConnection.send(peerPendingMessages.shift());
+      sendTransportMessage(peerPendingMessages.shift());
     } catch (error) {
       console.warn(error);
       break;
@@ -520,10 +557,16 @@ function applyPeerRom(romData, name = 'NES 游戏') {
 
 function updateNetworkButtons() {
   const active = networkRole !== 'offline';
-  if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && peerReady ? '直连房间已创建' : '创建直连房间';
+  if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间';
+  if (relayHostBtn) {
+    relayHostBtn.classList.toggle('hidden', !RELAY_SERVER_URL);
+    relayHostBtn.textContent = networkRole === 'host' && networkTransport === 'relay' && relayReady ? '跨网房间已创建' : '创建跨网房间';
+    relayHostBtn.disabled = active || !RELAY_SERVER_URL;
+    relayHostBtn.title = RELAY_SERVER_URL ? '通过私有公网中继连接异地玩家' : '公网中继尚未部署';
+  }
   if (netHostBtn) netHostBtn.disabled = active;
   if (netLeaveBtn) netLeaveBtn.disabled = !active;
-  if (netCopyBtn) netCopyBtn.disabled = !roomId || !peerReady;
+  if (netCopyBtn) netCopyBtn.disabled = !roomId || (networkTransport === 'relay' ? !relayReady : !peerReady);
 }
 
 function teardownPeerConnection(finalStatus = '') {
@@ -535,7 +578,8 @@ function teardownPeerConnection(finalStatus = '') {
   scheduledNetworkInputs = [];
   hostClockFrame = null;
   lastNetworkClockAt = 0;
-  setNetworkText(finalStatus || (networkRole === 'host' ? '房间已创建，等待加入' : networkRole === 'guest' ? '已断开联机' : '未联机'));
+  const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
+  setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
 }
 
@@ -544,6 +588,14 @@ function teardownPeer() {
   peer?.destroy?.();
   peer = null;
   peerReady = false;
+  if (relaySocket) {
+    relaySocket.onclose = null;
+    relaySocket.onerror = null;
+    relaySocket.close();
+  }
+  relaySocket = null;
+  relayReady = false;
+  relayPendingRomName = '';
 }
 
 function markNetworkConnected() {
@@ -651,7 +703,8 @@ function createPeerRoom(nextRoomId) {
   nextRoomId ||= generateRoomId();
   teardownPeer();
   roomId = nextRoomId;
-  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'host', roomId }));
+  networkTransport = 'peer';
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'host', roomId, transport: 'peer' }));
   networkRole = 'host';
   localPlayer = 1;
   remotePlayer = 2;
@@ -691,7 +744,8 @@ function joinPeerRoom(nextRoomId) {
   if (!nextRoomId) return;
   teardownPeer();
   roomId = nextRoomId;
-  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'guest', roomId }));
+  networkTransport = 'peer';
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'guest', roomId, transport: 'peer' }));
   networkRole = 'guest';
   localPlayer = 2;
   remotePlayer = 1;
@@ -712,6 +766,103 @@ function joinPeerRoom(nextRoomId) {
   });
 }
 
+function normalizeRelayUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('公网中继尚未配置');
+  const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+  if (url.protocol === 'https:') url.protocol = 'wss:';
+  if (url.protocol === 'http:') url.protocol = 'ws:';
+  const localHost = ['localhost', '127.0.0.1'].includes(url.hostname);
+  if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && localHost)) {
+    throw new Error('公网中继必须使用 HTTPS/WSS');
+  }
+  url.pathname = '/relay';
+  url.search = '';
+  url.hash = '';
+  return url;
+}
+
+function handleRelayControl(message) {
+  if (message.__relay === 'ready') {
+    relayReady = true;
+    refreshInviteLink();
+    updateNetworkButtons();
+    if (message.peerConnected) markNetworkConnected();
+    else setNetworkText(networkRole === 'host' ? '跨网房间已创建，等待 2P 加入' : '已连接中继，等待 1P');
+    return true;
+  }
+  if (message.__relay === 'peer-connected') {
+    markNetworkConnected();
+    return true;
+  }
+  if (message.__relay === 'peer-left') {
+    teardownPeerConnection(networkRole === 'host' ? '2P 已离开，等待重新加入' : '1P 已离开房间');
+    return true;
+  }
+  return Boolean(message.__relay);
+}
+
+function handleRelayData(data) {
+  if (data instanceof ArrayBuffer) {
+    if (!relayPendingRomName) return;
+    const name = relayPendingRomName;
+    relayPendingRomName = '';
+    handleNetworkMessage({ type: 'rom', name, data: arrayBufferToBinary(data) });
+    return;
+  }
+  if (typeof data !== 'string') return;
+  try {
+    const message = JSON.parse(data);
+    if (handleRelayControl(message)) return;
+    if (message.__nes === 'rom') {
+      relayPendingRomName = message.name || 'NES 游戏';
+      return;
+    }
+    handleNetworkMessage(message);
+  } catch (error) {
+    console.warn('无法读取公网中继消息', error);
+  }
+}
+
+function connectRelay(role, nextRoomId) {
+  let socketUrl;
+  try {
+    socketUrl = normalizeRelayUrl(RELAY_SERVER_URL);
+  } catch (error) {
+    setNetworkText(error.message || '公网中继地址无效');
+    return;
+  }
+  teardownPeer();
+  networkTransport = 'relay';
+  networkRole = role;
+  roomId = String(nextRoomId || '').trim() || generateRoomId();
+  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role, roomId, transport: 'relay' }));
+  localPlayer = role === 'host' ? 1 : 2;
+  remotePlayer = role === 'host' ? 2 : 1;
+  socketUrl.searchParams.set('room', roomId);
+  socketUrl.searchParams.set('role', role);
+  relaySocket = new WebSocket(socketUrl);
+  relaySocket.binaryType = 'arraybuffer';
+  setNetworkText(role === 'host' ? '正在创建跨网房间...' : '正在加入跨网房间...');
+  refreshInviteLink();
+  updateNetworkButtons();
+  relaySocket.onmessage = (event) => handleRelayData(event.data);
+  relaySocket.onerror = () => setNetworkText('公网中继连接失败，请确认服务器在线');
+  relaySocket.onclose = (event) => {
+    relayReady = false;
+    const reason = event.reason ? `：${event.reason}` : '';
+    teardownPeerConnection(`公网中继已断开${reason}`);
+  };
+}
+
+function createRelayRoom(nextRoomId) {
+  connectRelay('host', nextRoomId || generateRoomId());
+}
+
+function joinRelayRoom(nextRoomId) {
+  if (nextRoomId) connectRelay('guest', nextRoomId);
+}
+
 function getRoomIdFromInput(value) {
   const input = String(value || '').trim();
   if (!input) return '';
@@ -728,14 +879,26 @@ function getRoomIdFromInput(value) {
   return /^[a-zA-Z0-9_-]{6,128}$/.test(candidate) ? candidate : '';
 }
 
-function enterGuestRoom(nextRoomId) {
+function getTransportFromInput(value) {
+  try {
+    const url = new URL(String(value || '').trim(), window.location.href);
+    return url.searchParams.get('transport') === 'relay' ? 'relay' : 'peer';
+  } catch (error) {
+    return 'peer';
+  }
+}
+
+function enterGuestRoom(nextRoomId, transport = 'peer') {
   const url = new URL(window.location.href);
   url.searchParams.set('room', nextRoomId);
   url.searchParams.delete('host');
+  if (transport === 'relay') url.searchParams.set('transport', 'relay');
+  else url.searchParams.delete('transport');
   window.history.replaceState({}, '', url);
   ensureDemoScreen();
   setStatus('正在连接 1P 房间...');
-  joinPeerRoom(nextRoomId);
+  if (transport === 'relay') joinRelayRoom(nextRoomId);
+  else joinPeerRoom(nextRoomId);
 }
 
 function restoreNetworkRoom() {
@@ -743,7 +906,7 @@ function restoreNetworkRoom() {
   const nextRoom = params.get('room');
   if (nextRoom) {
     const validRoom = getRoomIdFromInput(nextRoom);
-    if (validRoom) enterGuestRoom(validRoom);
+    if (validRoom) enterGuestRoom(validRoom, params.get('transport') === 'relay' ? 'relay' : 'peer');
     else {
       inviteStatusText.textContent = '房间链接无效，请让 1P 重新复制邀请链接';
       inviteStatusText.classList.remove('hidden');
@@ -753,7 +916,8 @@ function restoreNetworkRoom() {
   try {
     const saved = JSON.parse(localStorage.getItem(NETWORK_STORAGE_KEY) || 'null');
     if (saved?.role === 'host' && saved.roomId) {
-      createPeerRoom(saved.roomId);
+      if (saved.transport === 'relay') createRelayRoom(saved.roomId);
+      else createPeerRoom(saved.roomId);
       return;
     }
   } catch (error) {
@@ -1142,7 +1306,7 @@ joinRoomForm.addEventListener('submit', (event) => {
     joinRoomInput.focus();
     return;
   }
-  enterGuestRoom(nextRoom);
+  enterGuestRoom(nextRoom, getTransportFromInput(joinRoomInput.value));
 });
 librarySearchInput.addEventListener('input', renderGameLibrary);
 closeLibraryBtn.addEventListener('click', () => libraryDialog.close());
@@ -1239,6 +1403,7 @@ netHostBtn.addEventListener('click', () => {
   createPeerRoom();
   refreshInviteLink();
 });
+relayHostBtn.addEventListener('click', () => createRelayRoom());
 netCopyBtn.addEventListener('click', async () => {
   const url = getInviteUrl();
   if (!url) return;
@@ -1256,6 +1421,7 @@ netLeaveBtn.addEventListener('click', () => {
   teardownPeer();
   roomId = '';
   networkRole = 'offline';
+  networkTransport = 'peer';
   localStorage.removeItem(NETWORK_STORAGE_KEY);
   setNetworkText('未联机');
   refreshInviteLink();
