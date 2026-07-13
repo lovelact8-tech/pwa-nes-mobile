@@ -108,6 +108,7 @@ let lastQueuedLocalButtons = new Set();
 let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
+let lastStateRequestAt = 0;
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
 const RELAY_SERVER_URL = String(import.meta.env.VITE_RELAY_URL || '').trim();
 
@@ -586,6 +587,7 @@ function teardownPeerConnection(finalStatus = '') {
   peerPendingMessages = [];
   scheduledNetworkInputs = [];
   hostClockFrame = null;
+  lastStateRequestAt = 0;
   lastNetworkClockAt = 0;
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
@@ -629,6 +631,10 @@ function handleNetworkMessage(message) {
     sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
     return;
   }
+  if (message.type === 'state-request' && networkRole === 'host') {
+    sendPeerSnapshot();
+    return;
+  }
   if (message.type === 'input' && networkRole === 'guest') {
     scheduleNetworkInput(message.player, message.buttons, message.frame);
     return;
@@ -641,6 +647,9 @@ function handleNetworkMessage(message) {
   if (message.type === 'rom' && networkRole === 'guest') {
     applyPeerRom(message.data, message.name || 'NES 游戏');
     peerRomSent = true;
+    // Request the snapshot after the guest has loaded the ROM. This avoids
+    // the initial state arriving before the emulator exists on slower phones.
+    sendPeerMessage({ type: 'state-request' });
     return;
   }
   if (message.type === 'state' && nes && networkRole === 'guest') {
@@ -1278,6 +1287,7 @@ function startRom(romData, name = 'NES 游戏') {
     scheduledNetworkInputs = [];
     lastQueuedLocalButtons = new Set();
     hostClockFrame = null;
+    lastStateRequestAt = 0;
     for (const player of [1, 2]) {
       for (const buttonName of buttonStateByPlayer[player]) {
         const code = buttonMap[buttonName];
@@ -1343,6 +1353,13 @@ function loop(timestamp) {
   if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
     sendPeerMessage({ type: 'clock', frame: gameFrame });
+  }
+  if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
+    const drift = Math.abs(hostClockFrame - gameFrame);
+    if (drift > 45 && timestamp - lastStateRequestAt > 1200) {
+      lastStateRequestAt = timestamp;
+      sendPeerMessage({ type: 'state-request' });
+    }
   }
   rafId = requestAnimationFrame(loop);
 }
