@@ -943,7 +943,9 @@ function getRoomIdFromInput(value) {
 function getTransportFromInput(value) {
   try {
     const url = new URL(String(value || '').trim(), window.location.href);
-    return url.searchParams.get('transport') === 'relay' ? 'relay' : 'peer';
+    // A relay ticket is authoritative. This prevents a copied/truncated
+    // transport parameter from silently falling back to direct WebRTC.
+    return url.searchParams.get('transport') === 'relay' || url.searchParams.has('ticket') ? 'relay' : 'peer';
   } catch (error) {
     return 'peer';
   }
@@ -1391,10 +1393,17 @@ joinRoomForm.addEventListener('submit', (event) => {
     joinRoomInput.focus();
     return;
   }
+  const transport = getTransportFromInput(joinRoomInput.value);
+  const ticket = getRelayTicketFromInput(joinRoomInput.value);
+  if (transport === 'relay' && !ticket) {
+    inviteStatusText.textContent = '跨网邀请链接不完整：请让 1P 重新复制完整链接';
+    inviteStatusText.classList.remove('hidden');
+    return;
+  }
   enterGuestRoom(
     nextRoom,
-    getTransportFromInput(joinRoomInput.value),
-    getRelayTicketFromInput(joinRoomInput.value),
+    transport,
+    ticket,
   );
 });
 librarySearchInput.addEventListener('input', renderGameLibrary);
