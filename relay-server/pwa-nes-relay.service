@@ -10,6 +10,8 @@ Environment=HOST=127.0.0.1
 Environment=PORT=8787
 Environment=TRUST_PROXY=1
 Environment=ALLOWED_ORIGINS=https://lovelact8-tech.github.io
+Environment=TICKET_TTL_SECONDS=7200
+EnvironmentFile=/etc/pwa-nes-relay.env
 ExecStart=/usr/bin/node relay-server/server.mjs
 Restart=always
 RestartSec=3

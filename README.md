@@ -34,10 +34,14 @@
 
 ```bash
 npm ci
+sudo cp relay-server/pwa-nes-relay.env.example /etc/pwa-nes-relay.env
+sudo chmod 600 /etc/pwa-nes-relay.env
 sudo cp relay-server/pwa-nes-relay.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now pwa-nes-relay
 ```
+
+部署前编辑 `/etc/pwa-nes-relay.env`：`RELAY_ACCESS_KEY` 设置为只有你知道的至少 16 位访问码，`RELAY_TOKEN_SECRET` 使用独立的至少 32 位随机字符串。这两个值只保存在 VPS，禁止提交到 GitHub。
 
 把 `relay-server/Caddyfile.example` 中的域名改成自己的域名并启动 Caddy。服务器需要开放 TCP 80/443，不需要开放 8787。健康检查地址为 `https://你的域名/health`。
 
@@ -47,4 +51,6 @@ sudo systemctl enable --now pwa-nes-relay
 VITE_RELAY_URL=https://你的中继域名
 ```
 
-然后重新运行 GitHub Pages 工作流。中继仅接受 `https://lovelact8-tech.github.io` 来源，每个房间最多 1P 和 2P 各一人，并限制单 IP 连接数、消息大小和传输速率。
+然后重新运行 GitHub Pages 工作流。创建跨网房间时，1P 必须输入私人访问码；服务器验证后只签发当前房间、当前角色可用且两小时后过期的票据。访问码不会保存到网页或邀请链接，2P 只能使用邀请票据加入该房间，不能创建新房间。
+
+中继还会限制网页来源、每房间人数、单 IP 连接数、消息大小、传输速率和访问码尝试次数。

@@ -46,6 +46,8 @@ const saveStateBtn = document.querySelector('#saveStateBtn');
 const loadStateBtn = document.querySelector('#loadStateBtn');
 const netHostBtn = document.querySelector('#netHostBtn');
 const relayHostBtn = document.querySelector('#relayHostBtn');
+const relayAccessRow = document.querySelector('#relayAccessRow');
+const relayAccessKey = document.querySelector('#relayAccessKey');
 const netCopyBtn = document.querySelector('#netCopyBtn');
 const netLeaveBtn = document.querySelector('#netLeaveBtn');
 const netLinkInput = document.querySelector('#netLinkInput');
@@ -94,6 +96,7 @@ let peerConnected = false;
 let relaySocket = null;
 let relayReady = false;
 let relayPendingRomName = '';
+let relayGuestTicket = '';
 let peerPendingMessages = [];
 let peerRomSent = false;
 let pendingPeerRomData = null;
@@ -372,8 +375,13 @@ function getInviteUrl() {
   const url = new URL(window.location.href);
   url.searchParams.set('room', roomId);
   url.searchParams.delete('host');
-  if (networkTransport === 'relay') url.searchParams.set('transport', 'relay');
-  else url.searchParams.delete('transport');
+  if (networkTransport === 'relay') {
+    url.searchParams.set('transport', 'relay');
+    if (relayGuestTicket) url.searchParams.set('ticket', relayGuestTicket);
+  } else {
+    url.searchParams.delete('transport');
+    url.searchParams.delete('ticket');
+  }
   return url.toString();
 }
 
@@ -564,6 +572,7 @@ function updateNetworkButtons() {
     relayHostBtn.disabled = active || !RELAY_SERVER_URL;
     relayHostBtn.title = RELAY_SERVER_URL ? '通过私有公网中继连接异地玩家' : '公网中继尚未部署';
   }
+  relayAccessRow?.classList.toggle('hidden', !RELAY_SERVER_URL || active);
   if (netHostBtn) netHostBtn.disabled = active;
   if (netLeaveBtn) netLeaveBtn.disabled = !active;
   if (netCopyBtn) netCopyBtn.disabled = !roomId || (networkTransport === 'relay' ? !relayReady : !peerReady);
@@ -596,6 +605,7 @@ function teardownPeer() {
   relaySocket = null;
   relayReady = false;
   relayPendingRomName = '';
+  relayGuestTicket = '';
 }
 
 function markNetworkConnected() {
@@ -782,6 +792,26 @@ function normalizeRelayUrl(value) {
   return url;
 }
 
+function getRelayTicketUrl() {
+  const url = normalizeRelayUrl(RELAY_SERVER_URL);
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+  url.pathname = '/ticket';
+  return url;
+}
+
+async function requestRelayTickets(nextRoomId, accessKey) {
+  const response = await fetch(getRelayTicketUrl(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ roomId: nextRoomId, accessKey }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.hostToken || !result.guestToken) {
+    throw new Error(result.error || '私人访问码验证失败');
+  }
+  return result;
+}
+
 function handleRelayControl(message) {
   if (message.__relay === 'ready') {
     relayReady = true;
@@ -824,7 +854,7 @@ function handleRelayData(data) {
   }
 }
 
-function connectRelay(role, nextRoomId) {
+function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   let socketUrl;
   try {
     socketUrl = normalizeRelayUrl(RELAY_SERVER_URL);
@@ -832,15 +862,21 @@ function connectRelay(role, nextRoomId) {
     setNetworkText(error.message || '公网中继地址无效');
     return;
   }
+  if (!ticket) {
+    setNetworkText('邀请票据无效，请让 1P 重新创建跨网房间');
+    return;
+  }
   teardownPeer();
   networkTransport = 'relay';
   networkRole = role;
   roomId = String(nextRoomId || '').trim() || generateRoomId();
-  localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role, roomId, transport: 'relay' }));
+  relayGuestTicket = guestTicket;
+  localStorage.removeItem(NETWORK_STORAGE_KEY);
   localPlayer = role === 'host' ? 1 : 2;
   remotePlayer = role === 'host' ? 2 : 1;
   socketUrl.searchParams.set('room', roomId);
   socketUrl.searchParams.set('role', role);
+  socketUrl.searchParams.set('ticket', ticket);
   relaySocket = new WebSocket(socketUrl);
   relaySocket.binaryType = 'arraybuffer';
   setNetworkText(role === 'host' ? '正在创建跨网房间...' : '正在加入跨网房间...');
@@ -855,12 +891,27 @@ function connectRelay(role, nextRoomId) {
   };
 }
 
-function createRelayRoom(nextRoomId) {
-  connectRelay('host', nextRoomId || generateRoomId());
+async function createRelayRoom(nextRoomId) {
+  const accessKey = relayAccessKey?.value || '';
+  if (!accessKey) {
+    setNetworkText('请先输入私人联机访问码');
+    relayAccessKey?.focus();
+    return;
+  }
+  const nextRoom = nextRoomId || generateRoomId();
+  setNetworkText('正在验证私人访问码...');
+  try {
+    const tickets = await requestRelayTickets(nextRoom, accessKey);
+    if (relayAccessKey) relayAccessKey.value = '';
+    connectRelay('host', nextRoom, tickets.hostToken, tickets.guestToken);
+  } catch (error) {
+    console.warn(error);
+    setNetworkText(error.message || '无法创建私人跨网房间');
+  }
 }
 
-function joinRelayRoom(nextRoomId) {
-  if (nextRoomId) connectRelay('guest', nextRoomId);
+function joinRelayRoom(nextRoomId, ticket) {
+  if (nextRoomId) connectRelay('guest', nextRoomId, ticket);
 }
 
 function getRoomIdFromInput(value) {
@@ -888,16 +939,30 @@ function getTransportFromInput(value) {
   }
 }
 
-function enterGuestRoom(nextRoomId, transport = 'peer') {
+function getRelayTicketFromInput(value) {
+  try {
+    const url = new URL(String(value || '').trim(), window.location.href);
+    return String(url.searchParams.get('ticket') || '').trim();
+  } catch (error) {
+    return '';
+  }
+}
+
+function enterGuestRoom(nextRoomId, transport = 'peer', ticket = '') {
   const url = new URL(window.location.href);
   url.searchParams.set('room', nextRoomId);
   url.searchParams.delete('host');
-  if (transport === 'relay') url.searchParams.set('transport', 'relay');
-  else url.searchParams.delete('transport');
+  if (transport === 'relay') {
+    url.searchParams.set('transport', 'relay');
+    if (ticket) url.searchParams.set('ticket', ticket);
+  } else {
+    url.searchParams.delete('transport');
+    url.searchParams.delete('ticket');
+  }
   window.history.replaceState({}, '', url);
   ensureDemoScreen();
   setStatus('正在连接 1P 房间...');
-  if (transport === 'relay') joinRelayRoom(nextRoomId);
+  if (transport === 'relay') joinRelayRoom(nextRoomId, ticket);
   else joinPeerRoom(nextRoomId);
 }
 
@@ -906,7 +971,11 @@ function restoreNetworkRoom() {
   const nextRoom = params.get('room');
   if (nextRoom) {
     const validRoom = getRoomIdFromInput(nextRoom);
-    if (validRoom) enterGuestRoom(validRoom, params.get('transport') === 'relay' ? 'relay' : 'peer');
+    if (validRoom) enterGuestRoom(
+      validRoom,
+      params.get('transport') === 'relay' ? 'relay' : 'peer',
+      params.get('ticket') || '',
+    );
     else {
       inviteStatusText.textContent = '房间链接无效，请让 1P 重新复制邀请链接';
       inviteStatusText.classList.remove('hidden');
@@ -915,9 +984,8 @@ function restoreNetworkRoom() {
   }
   try {
     const saved = JSON.parse(localStorage.getItem(NETWORK_STORAGE_KEY) || 'null');
-    if (saved?.role === 'host' && saved.roomId) {
-      if (saved.transport === 'relay') createRelayRoom(saved.roomId);
-      else createPeerRoom(saved.roomId);
+    if (saved?.role === 'host' && saved.roomId && saved.transport !== 'relay') {
+      createPeerRoom(saved.roomId);
       return;
     }
   } catch (error) {
@@ -1306,7 +1374,11 @@ joinRoomForm.addEventListener('submit', (event) => {
     joinRoomInput.focus();
     return;
   }
-  enterGuestRoom(nextRoom, getTransportFromInput(joinRoomInput.value));
+  enterGuestRoom(
+    nextRoom,
+    getTransportFromInput(joinRoomInput.value),
+    getRelayTicketFromInput(joinRoomInput.value),
+  );
 });
 librarySearchInput.addEventListener('input', renderGameLibrary);
 closeLibraryBtn.addEventListener('click', () => libraryDialog.close());
