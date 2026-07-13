@@ -30,6 +30,7 @@ const libraryStatusText = document.querySelector('#libraryStatusText');
 const libraryResults = document.querySelector('#libraryResults');
 const closeLibraryBtn = document.querySelector('#closeLibraryBtn');
 const statusText = document.querySelector('#statusText');
+const inviteStatusText = document.querySelector('#inviteStatusText');
 const pauseBtn = document.querySelector('#pauseBtn');
 const soundBtn = document.querySelector('#soundBtn');
 const settingsBtn = document.querySelector('#settingsBtn');
@@ -277,6 +278,10 @@ function loadGameState() {
 
 function setNetworkText(text) {
   if (netStatusText) netStatusText.textContent = text;
+  if (inviteStatusText && (networkRole === 'guest' || new URLSearchParams(window.location.search).has('room'))) {
+    inviteStatusText.textContent = text;
+    inviteStatusText.classList.remove('hidden');
+  }
 }
 
 function getInviteUrl() {
@@ -440,7 +445,7 @@ function updateNetworkButtons() {
   if (netCopyBtn) netCopyBtn.disabled = !roomId;
 }
 
-function teardownPeerConnection() {
+function teardownPeerConnection(finalStatus = '') {
   peerConnected = false;
   peerRomSent = false;
   peerConnection?.close?.();
@@ -449,7 +454,7 @@ function teardownPeerConnection() {
   scheduledNetworkInputs = [];
   hostClockFrame = null;
   lastNetworkClockAt = 0;
-  setNetworkText(networkRole === 'host' ? '房间已创建，等待加入' : networkRole === 'guest' ? '已断开联机' : '未联机');
+  setNetworkText(finalStatus || (networkRole === 'host' ? '房间已创建，等待加入' : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
 }
 
@@ -462,10 +467,14 @@ function teardownPeer() {
 
 function configurePeerConnection(connection) {
   peerConnection = connection;
+  const connectionTimeout = window.setTimeout(() => {
+    if (!connection.open) setNetworkText('连接超时：请确认 1P 房间仍然开启，并检查双方网络');
+  }, 12000);
   connection.on('open', () => {
+    clearTimeout(connectionTimeout);
     peerConnected = true;
     flushPeerQueue();
-    setNetworkText(networkRole === 'host' ? '2P 已连接' : '已加入联机房间');
+    setNetworkText(networkRole === 'host' ? '2P 已连接' : '已加入房间，等待 1P 选择游戏');
     updateNetworkButtons();
     if (networkRole === 'host' && lastRomData && !peerRomSent) {
       sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
@@ -510,11 +519,13 @@ function configurePeerConnection(connection) {
     }
   });
   connection.on('close', () => {
+    clearTimeout(connectionTimeout);
     teardownPeerConnection();
   });
   connection.on('error', (error) => {
+    clearTimeout(connectionTimeout);
     console.warn(error);
-    teardownPeerConnection();
+    teardownPeerConnection(getPeerErrorText('联机连接', error));
   });
 }
 
@@ -574,8 +585,7 @@ function createPeerRoom(nextRoomId) {
   });
   peer.on('error', (error) => {
     console.warn(error);
-    setNetworkText(getPeerErrorText('创建房间', error));
-    teardownPeerConnection();
+    teardownPeerConnection(getPeerErrorText('创建房间', error));
   });
 }
 
@@ -584,6 +594,7 @@ function joinPeerRoom(nextRoomId) {
     setNetworkText('联机库未加载');
     return;
   }
+  nextRoomId = String(nextRoomId || '').trim();
   if (!nextRoomId) return;
   teardownPeer();
   roomId = nextRoomId;
@@ -601,8 +612,10 @@ function joinPeerRoom(nextRoomId) {
   });
   peer.on('error', (error) => {
     console.warn(error);
-    setNetworkText(getPeerErrorText('加入房间', error));
-    teardownPeerConnection();
+    teardownPeerConnection(getPeerErrorText('加入房间', error));
+  });
+  peer.on('disconnected', () => {
+    if (!peerConnected) setNetworkText('联机服务器已断开，请刷新页面重试');
   });
 }
 

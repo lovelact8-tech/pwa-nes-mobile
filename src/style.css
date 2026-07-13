@@ -12,6 +12,7 @@ button, input { font: inherit; }
 .fileBtn.compact { margin-bottom: 10px; }
 .secondary { margin-top: 12px; background: rgba(255,255,255,.14); width: 100%; }
 .hint, .smallText { font-size: 13px; color: #aeb9cd !important; }
+.inviteStatus { margin: 14px 0 0 !important; padding: 11px 12px; border-radius: 12px; background: rgba(43,112,255,.16); border: 1px solid rgba(96,165,250,.35); color: #dbeafe !important; font-size: 14px; }
 .game { width: 100vw; height: 100svh; overflow: hidden; background: #05070d; padding: calc(env(safe-area-inset-top) + 6px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px); display: grid; grid-template-rows: 40px minmax(0, 1fr) 222px; gap: 8px; }
 body.browser-mode .game { padding-bottom: calc(env(safe-area-inset-bottom) + 78px); grid-template-rows: 40px minmax(120px, 1fr) 218px; }
 .topHud { height: 40px; display: grid; grid-template-columns: 64px minmax(0,1fr) 54px 54px 54px; align-items: center; gap: 6px; color: #cbd5e1; }
