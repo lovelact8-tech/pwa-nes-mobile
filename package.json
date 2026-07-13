@@ -4,7 +4,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "games:index": "node scripts/generate-games.mjs",
+    "predev": "npm run games:index",
     "dev": "vite --host 0.0.0.0",
+    "prebuild": "npm run games:index",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
@@ -13,6 +16,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "fflate": "^0.8.3",
     "jsnes": "^2.1.0",
     "peerjs": "^1.5.5",
     "vite": "^8.1.3"

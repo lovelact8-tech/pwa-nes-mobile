@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pwa-nes-mobile-v24';
+const CACHE_NAME = 'pwa-nes-mobile-v25';
 const BASE_PATH = new URL('./', self.location.href).pathname;
 const ASSETS = [BASE_PATH, `${BASE_PATH}manifest.webmanifest`, `${BASE_PATH}icon-192.png`, `${BASE_PATH}icon-512.png`];
 
@@ -18,6 +18,10 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (/\.(zip|nes)$/i.test(url.pathname)) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   if (event.request.mode === 'navigate') {
     event.respondWith(

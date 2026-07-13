@@ -1,6 +1,7 @@
 import './style.css';
 import { NES, Controller } from 'jsnes';
 import Peer from 'peerjs';
+import { unzipSync } from 'fflate';
 
 const SCREEN_WIDTH = 256;
 const SCREEN_HEIGHT = 240;
@@ -21,6 +22,13 @@ const frameBuffer32 = new Uint32Array(imageData.data.buffer);
 const romInput = document.querySelector('#romInput');
 const romInput2 = document.querySelector('#romInput2');
 const demoBtn = document.querySelector('#demoBtn');
+const libraryBtn = document.querySelector('#libraryBtn');
+const menuLibraryBtn = document.querySelector('#menuLibraryBtn');
+const libraryDialog = document.querySelector('#libraryDialog');
+const librarySearchInput = document.querySelector('#librarySearchInput');
+const libraryStatusText = document.querySelector('#libraryStatusText');
+const libraryResults = document.querySelector('#libraryResults');
+const closeLibraryBtn = document.querySelector('#closeLibraryBtn');
 const statusText = document.querySelector('#statusText');
 const pauseBtn = document.querySelector('#pauseBtn');
 const soundBtn = document.querySelector('#soundBtn');
@@ -79,6 +87,7 @@ let peerPendingMessages = [];
 let peerRomSent = false;
 let pendingPeerRomData = null;
 let suppressNetworkBroadcast = false;
+let gameLibrary = null;
 let gameFrame = 0;
 let scheduledNetworkInputs = [];
 let lastQueuedLocalButtons = new Set();
@@ -790,6 +799,75 @@ async function loadFile(file) {
   startRom(romData, file.name);
 }
 
+function normalizeGameSearch(text) {
+  return String(text || '').normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
+}
+
+function renderGameLibrary() {
+  if (!gameLibrary) return;
+  const query = normalizeGameSearch(librarySearchInput.value);
+  const matches = gameLibrary.filter((game) => !query || game.search.includes(query));
+  const visible = matches.slice(0, 120);
+  libraryStatusText.textContent = matches.length > visible.length
+    ? `找到 ${matches.length} 个游戏，显示前 ${visible.length} 个，请继续输入名称缩小范围`
+    : `找到 ${matches.length} 个游戏`;
+  libraryResults.replaceChildren();
+  for (const game of visible) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'libraryGameBtn';
+    button.textContent = game.name;
+    button.addEventListener('click', () => loadLibraryGame(game));
+    libraryResults.appendChild(button);
+  }
+}
+
+async function ensureGameLibrary() {
+  if (gameLibrary) return;
+  libraryStatusText.textContent = '正在读取游戏目录...';
+  const response = await fetch(`${import.meta.env.BASE_URL}games.json`, { cache: 'no-cache' });
+  if (!response.ok) throw new Error(`游戏目录加载失败：${response.status}`);
+  const games = await response.json();
+  gameLibrary = games.map((game) => ({ ...game, search: normalizeGameSearch(game.name) }));
+}
+
+async function openGameLibrary() {
+  menuDialog.open && menuDialog.close();
+  libraryDialog.showModal();
+  try {
+    await ensureGameLibrary();
+    renderGameLibrary();
+    librarySearchInput.focus();
+  } catch (error) {
+    console.error(error);
+    libraryStatusText.textContent = '游戏目录加载失败，请刷新页面重试';
+  }
+}
+
+async function loadLibraryGame(game) {
+  libraryStatusText.textContent = `正在下载：${game.name}`;
+  libraryResults.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+  try {
+    initAudio();
+    const response = await fetch(`${import.meta.env.BASE_URL}${game.path}`);
+    if (!response.ok) throw new Error(`游戏下载失败：${response.status}`);
+    const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+    const romEntry = Object.entries(files).find(([name]) => name.toLowerCase().endsWith('.nes'));
+    if (!romEntry) throw new Error('压缩包中没有找到 .nes 文件');
+    const [, bytes] = romEntry;
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const displayName = `${game.name}.nes`;
+    lastRomData = arrayBufferToBinary(buffer);
+    lastRomName = displayName;
+    libraryDialog.close();
+    startRom(lastRomData, displayName);
+  } catch (error) {
+    console.error(error);
+    libraryStatusText.textContent = `加载失败：${error.message || '请重试'}`;
+    libraryResults.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+  }
+}
+
 function startRom(romData, name = 'NES 游戏') {
   try {
     stopLoop();
@@ -886,6 +964,10 @@ romInput2.addEventListener('change', (e) => {
   menuDialog.close();
   loadFile(e.target.files?.[0]);
 });
+libraryBtn.addEventListener('click', openGameLibrary);
+menuLibraryBtn.addEventListener('click', openGameLibrary);
+librarySearchInput.addEventListener('input', renderGameLibrary);
+closeLibraryBtn.addEventListener('click', () => libraryDialog.close());
 
 demoBtn.addEventListener('click', () => {
   initAudio();

@@ -20,6 +20,7 @@
             选择 NES 游戏
             <input id="romInput" type="file" accept=".nes,application/octet-stream" />
           </label>
+          <button id="libraryBtn" class="secondary">搜索中文游戏库</button>
           <button id="demoBtn" class="secondary">只进入手柄测试界面</button>
           <p class="hint">新版：按钮区域加大，A/B 不再跑到屏幕外；声音改成 iPhone 本地网页也能用的方式。</p>
         </div>
@@ -71,6 +72,7 @@
           换一个 NES 文件
           <input id="romInput2" type="file" accept=".nes,application/octet-stream" />
         </label>
+        <button id="menuLibraryBtn">搜索中文游戏库</button>
         <button id="resumeBtn">继续游戏</button>
         <button id="saveStateBtn">保存游戏</button>
         <button id="loadStateBtn">加载游戏</button>
@@ -82,6 +84,14 @@
         <button id="resetBtn">重启当前游戏</button>
         <button id="closeMenuBtn">关闭</button>
         <p class="smallText">建议：Safari 打开后“分享 → 添加到主屏幕”，按钮空间会比浏览器里更大。</p>
+      </dialog>
+
+      <dialog id="libraryDialog" class="libraryDialog">
+        <h2>中文游戏库</h2>
+        <input id="librarySearchInput" class="librarySearch" type="search" placeholder="搜索游戏名称，例如：魂斗罗" autocomplete="off" />
+        <p id="libraryStatusText" class="smallText">正在读取游戏目录...</p>
+        <div id="libraryResults" class="libraryResults"></div>
+        <button id="closeLibraryBtn">关闭</button>
       </dialog>
 
       <dialog id="settingsDialog">
