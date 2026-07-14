@@ -25,6 +25,10 @@ const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
 const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
+const ROLLBACK_SNAPSHOT_INTERVAL_FRAMES = 4;
+const ROLLBACK_WINDOW_FRAMES = 120;
+const ROLLBACK_MAX_SNAPSHOTS = Math.ceil(ROLLBACK_WINDOW_FRAMES / ROLLBACK_SNAPSHOT_INTERVAL_FRAMES) + 2;
+const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 300;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -127,6 +131,16 @@ let suppressNetworkBroadcast = false;
 let gameLibrary = null;
 let gameFrame = 0;
 let scheduledNetworkInputs = [];
+let networkInputHistory = [];
+let rollbackSnapshots = [];
+let localInputSequence = 0;
+let authoritativeInputOrder = 0;
+let networkEventOrder = 0;
+let rollbackInProgress = false;
+let rollbackCount = 0;
+let rollbackFrames = 0;
+let pendingStateChecks = new Map();
+let lastStateCheckFrame = -1;
 let lastQueuedLocalButtons = new Set();
 let lastNetworkClockAt = 0;
 let hostClockFrame = null;
@@ -456,6 +470,9 @@ function getNetworkDiagnosticLog() {
     `rttMs=${Math.round(networkRttMs)}`,
     `rttJitterMs=${Math.round(networkRttJitterMs)}`,
     `guestBufferFrames=${getRelayGuestBufferFrames()}`,
+    `rollbackCount=${rollbackCount}`,
+    `rollbackFrames=${rollbackFrames}`,
+    `rollbackSnapshots=${rollbackSnapshots.length}`,
     `gameFrame=${gameFrame}`,
     `hostFrame=${hostClockFrame ?? 'none'}`,
     `userAgent=${navigator.userAgent}`,
@@ -688,16 +705,23 @@ function flushPeerQueue() {
 function sendPeerButtons(player, buttons) {
   if (networkRole === 'offline') return;
   const nextButtons = Array.from(buttons || []);
+  const id = `${networkRole === 'host' ? 'h' : 'g'}-${++localInputSequence}`;
   if (networkRole === 'host') {
     const delayFrames = getNetworkInputDelayFrames();
     const frame = gameFrame + delayFrames;
-    logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame, delayFrames });
-    scheduleNetworkInput(player, nextButtons, frame);
-    sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame });
+    const order = ++authoritativeInputOrder;
+    logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame, delayFrames, id });
+    scheduleNetworkInput(player, nextButtons, frame, { id, order });
+    sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame, id, order });
     return;
   }
-  logNetworkEvent('input-send', { role: 'guest', player, buttons: nextButtons });
-  sendPeerMessage({ type: 'input-request', player, buttons: nextButtons });
+  // Predict 2P locally on the next frame. The host accepts this frame when it
+  // is inside the rollback window, then rewinds and confirms the same event.
+  const frame = gameFrame + 1;
+  const order = ++networkEventOrder;
+  scheduleNetworkInput(player, nextButtons, frame, { id, order });
+  logNetworkEvent('input-send', { role: 'guest', player, buttons: nextButtons, frame, id, predicted: true });
+  sendPeerMessage({ type: 'input-request', player, buttons: nextButtons, frame, id });
 }
 
 function getNetworkInputDelayFrames() {
@@ -759,28 +783,212 @@ function getRelayGuestBufferFrames(rttMs = networkRttMs) {
   );
 }
 
-function scheduleNetworkInput(player, buttons, frame) {
-  const requestedFrame = Number(frame) || gameFrame;
-  // Inputs are applied immediately before emulating `gameFrame`. Reaching the
-  // exact requested frame is therefore still on time; treating equality as
-  // late shifted one peer by a frame and permanently forked game outcomes.
-  let targetFrame = Math.max(gameFrame, requestedFrame);
-  const late = requestedFrame < gameFrame;
-  if (late) {
-    // Preserve late key-down/key-up transitions instead of mapping every
-    // packet to the same frame (where the final key-up used to erase taps).
-    const lastQueuedFrame = scheduledNetworkInputs.reduce(
-      (latest, input) => input.player === player ? Math.max(latest, input.frame) : latest,
-      gameFrame,
-    );
-    targetFrame = Math.max(targetFrame, lastQueuedFrame + 1);
-  } else {
-    // A repeated state for the same future frame is safe to replace.
-    scheduledNetworkInputs = scheduledNetworkInputs.filter((input) => !(input.player === player && input.frame === targetFrame));
+function compareNetworkInputs(left, right) {
+  return left.frame - right.frame || left.order - right.order || String(left.id).localeCompare(String(right.id));
+}
+
+function rebuildScheduledNetworkInputs(fromFrame = gameFrame) {
+  scheduledNetworkInputs = networkInputHistory
+    .filter((input) => input.frame >= fromFrame)
+    .map((input) => ({ ...input, buttons: [...input.buttons] }))
+    .sort(compareNetworkInputs);
+}
+
+function resetRollbackState({ capture = false, preserveInputsFromFrame = null } = {}) {
+  const preservedInputs = Number.isFinite(preserveInputsFromFrame)
+    ? networkInputHistory.filter((input) => input.frame >= preserveInputsFromFrame)
+    : [];
+  scheduledNetworkInputs = [];
+  networkInputHistory = preservedInputs;
+  rollbackSnapshots = [];
+  rollbackInProgress = false;
+  rollbackCount = 0;
+  rollbackFrames = 0;
+  pendingStateChecks = new Map();
+  lastStateCheckFrame = -1;
+  if (capture) captureRollbackSnapshot(true);
+  rebuildScheduledNetworkInputs(gameFrame);
+}
+
+function hashRollbackState(state) {
+  // PAPU contains output-sample-rate details that can legitimately differ
+  // between devices. CPU, mapper, PPU and controllers determine game state.
+  const text = JSON.stringify({
+    cpu: state.cpu,
+    mmap: state.mmap,
+    ppu: state.ppu,
+    controllers: state.controllers,
+  });
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-  scheduledNetworkInputs.push({ player, buttons: Array.from(buttons || []), frame: targetFrame });
-  scheduledNetworkInputs.sort((a, b) => a.frame - b.frame);
-  return { late, requestedFrame, targetFrame };
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function compareRollbackStateCheck(snapshot, expectedHash) {
+  const actualHash = snapshot.hash || (snapshot.hash = hashRollbackState(snapshot.state));
+  const match = actualHash === expectedHash;
+  logNetworkEvent(match ? 'state-check-ok' : 'state-check-mismatch', {
+    frame: snapshot.frame,
+    expectedHash,
+    actualHash,
+  });
+  pendingStateChecks.delete(snapshot.frame);
+  if (!match && networkRole === 'guest' && !stateRequestInFlight && !networkSyncId) {
+    requestInitialStateSync('desync');
+  }
+}
+
+function processRollbackStateCheck(snapshot) {
+  if (rollbackInProgress || snapshot.frame <= 0) return;
+  if (networkRole === 'host') {
+    // Only verify a frame after it has left the rollback window. A newer 2P
+    // input may legitimately rewrite recent host history.
+    const stableSnapshot = rollbackSnapshots.find((candidate) => (
+      candidate.frame > lastStateCheckFrame
+      && candidate.frame % NETWORK_STATE_CHECK_INTERVAL_FRAMES === 0
+      && candidate.frame <= gameFrame - ROLLBACK_WINDOW_FRAMES
+    ));
+    if (!stableSnapshot) return;
+    lastStateCheckFrame = stableSnapshot.frame;
+    const hash = stableSnapshot.hash || (stableSnapshot.hash = hashRollbackState(stableSnapshot.state));
+    sendPeerMessage({ type: 'state-check', frame: stableSnapshot.frame, hash });
+    logNetworkEvent('state-check-send', { frame: stableSnapshot.frame, hash });
+    return;
+  }
+  if (networkRole === 'guest' && pendingStateChecks.has(snapshot.frame)) {
+    compareRollbackStateCheck(snapshot, pendingStateChecks.get(snapshot.frame));
+  }
+}
+
+function captureRollbackSnapshot(force = false) {
+  if (!nes || networkRole === 'offline' || !peerConnected) return null;
+  if (!force && gameFrame % ROLLBACK_SNAPSHOT_INTERVAL_FRAMES !== 0) return null;
+  const existing = rollbackSnapshots.find((snapshot) => snapshot.frame === gameFrame);
+  if (existing) return existing;
+  const snapshot = {
+    frame: gameFrame,
+    state: nes.toJSON(),
+    buttons: {
+      1: Array.from(buttonStateByPlayer[1]),
+      2: Array.from(buttonStateByPlayer[2]),
+    },
+  };
+  rollbackSnapshots.push(snapshot);
+  rollbackSnapshots.sort((left, right) => left.frame - right.frame);
+  if (rollbackSnapshots.length > ROLLBACK_MAX_SNAPSHOTS) rollbackSnapshots.shift();
+  const oldestFrame = rollbackSnapshots[0]?.frame ?? Math.max(0, gameFrame - ROLLBACK_WINDOW_FRAMES);
+  networkInputHistory = networkInputHistory.filter((input) => input.frame >= oldestFrame);
+  processRollbackStateCheck(snapshot);
+  return snapshot;
+}
+
+function restoreRollbackButtons(snapshot) {
+  for (const player of [1, 2]) {
+    buttonStateByPlayer[player].clear();
+    for (const button of snapshot.buttons[player] || []) buttonStateByPlayer[player].add(button);
+  }
+}
+
+function syncButtonSetsFromNes() {
+  if (!nes?.controllers) return;
+  for (const player of [1, 2]) {
+    const controller = nes.controllers[player];
+    buttonStateByPlayer[player].clear();
+    for (const [name, code] of Object.entries(buttonMap)) {
+      const pressed = name === 'TURBO_A'
+        ? controller.turboA
+        : name === 'TURBO_B'
+          ? controller.turboB
+          : controller.state[code] === 0x41;
+      if (pressed) buttonStateByPlayer[player].add(name);
+    }
+  }
+}
+
+function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
+  if (!nes || rollbackInProgress || targetFrame >= gameFrame) return false;
+  const endFrame = gameFrame;
+  const snapshot = [...rollbackSnapshots].reverse().find((candidate) => candidate.frame <= targetFrame);
+  if (!snapshot) return false;
+  const startedAt = performance.now();
+  const previousSuppressOutput = suppressEmulatorOutput;
+  rollbackInProgress = true;
+  suppressEmulatorOutput = true;
+  try {
+    rollbackSnapshots = rollbackSnapshots.filter((candidate) => candidate.frame <= snapshot.frame);
+    nes.fromJSON(snapshot.state);
+    gameFrame = snapshot.frame;
+    restoreRollbackButtons(snapshot);
+    rebuildScheduledNetworkInputs(gameFrame);
+    while (gameFrame < endFrame) {
+      captureRollbackSnapshot();
+      applyScheduledNetworkInputs();
+      nes.frame();
+      gameFrame++;
+    }
+  } catch (error) {
+    console.warn('回滚重算失败', error);
+    logNetworkEvent('rollback-error', { name: error?.name || 'Error', message: error?.message || String(error) });
+    return false;
+  } finally {
+    rollbackInProgress = false;
+    suppressEmulatorOutput = previousSuppressOutput;
+    clearAudioBuffer();
+    syncButtonVisuals();
+    lastTick = 0;
+    frameRemainder = 0;
+  }
+  logNetworkEvent('rollback-complete', {
+    reason,
+    fromFrame: endFrame,
+    snapshotFrame: snapshot.frame,
+    targetFrame,
+    replayedFrames: endFrame - snapshot.frame,
+    durationMs: Math.round(performance.now() - startedAt),
+  });
+  rollbackCount++;
+  rollbackFrames += endFrame - snapshot.frame;
+  return true;
+}
+
+function buttonsMatch(left, right) {
+  return left.length === right.length && left.every((button, index) => button === right[index]);
+}
+
+function scheduleNetworkInput(player, buttons, frame, { id = '', order = 0, allowRollback = true } = {}) {
+  const requestedFrame = Math.max(0, Math.floor(Number(frame) || 0));
+  const normalizedButtons = Array.from(buttons || []).sort();
+  const inputId = String(id || `legacy-${++networkEventOrder}`);
+  const normalizedOrder = Math.max(1, Math.floor(Number(order) || ++networkEventOrder));
+  let rollbackFrame = requestedFrame;
+  let corrected = false;
+  const existing = networkInputHistory.find((input) => input.id === inputId);
+  if (existing) {
+    rollbackFrame = Math.min(existing.frame, requestedFrame);
+    corrected = existing.frame !== requestedFrame || existing.player !== player || !buttonsMatch(existing.buttons, normalizedButtons);
+    existing.player = player;
+    existing.buttons = normalizedButtons;
+    existing.frame = requestedFrame;
+    existing.order = normalizedOrder;
+  } else {
+    networkInputHistory.push({ id: inputId, player, buttons: normalizedButtons, frame: requestedFrame, order: normalizedOrder });
+  }
+  networkInputHistory.sort(compareNetworkInputs);
+  rebuildScheduledNetworkInputs(gameFrame);
+  const late = rollbackFrame < gameFrame;
+  const rolledBack = late && allowRollback && rollbackNetworkToFrame(rollbackFrame, corrected ? 'input-correction' : 'late-input');
+  return {
+    late,
+    rolledBack,
+    corrected,
+    duplicate: Boolean(existing) && !corrected,
+    requestedFrame,
+    targetFrame: requestedFrame,
+    id: inputId,
+  };
 }
 
 function applyScheduledNetworkInputs() {
@@ -837,7 +1045,12 @@ function requestInitialStateSync(reason = 'initial') {
   networkSyncPaused = true;
   stateRequestInFlight = true;
   lastStateRequestAt = performance.now();
-  setNetworkText(reason === 'late-input' ? '检测到网络抖动，正在恢复画面同步...' : '游戏已加载，正在同步 1P 进度...');
+  const statusText = reason === 'late-input'
+    ? '检测到网络抖动，正在恢复画面同步...'
+    : reason === 'desync'
+      ? '检测到状态差异，正在恢复权威进度...'
+      : '游戏已加载，正在同步 1P 进度...';
+  setNetworkText(statusText);
   logNetworkEvent('state-request-sent', { syncId, reason });
   sendPeerMessage({ type: 'state-request', syncId });
 }
@@ -863,6 +1076,7 @@ function fastForwardNetworkToFrame(targetFrame) {
   suppressEmulatorOutput = true;
   try {
     while (gameFrame < finalTarget) {
+      captureRollbackSnapshot();
       applyScheduledNetworkInputs();
       nes.frame();
       gameFrame++;
@@ -947,7 +1161,7 @@ function teardownPeerConnection(finalStatus = '') {
   peerConnection?.close?.();
   peerConnection = null;
   peerPendingMessages = [];
-  scheduledNetworkInputs = [];
+  resetRollbackState();
   hostClockFrame = null;
   lastStateRequestAt = 0;
   clearNetworkSync();
@@ -1010,6 +1224,7 @@ function cancelPendingDirectConnection() {
 function markNetworkConnected() {
   if (peerConnected) return;
   peerConnected = true;
+  resetRollbackState({ capture: Boolean(nes) });
   flushPeerQueue();
   const route = networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连';
   setNetworkText(networkRole === 'host' ? `2P 已连接（${route}）` : `已通过${route}加入，等待游戏同步`);
@@ -1039,12 +1254,39 @@ function handleNetworkMessage(message) {
     if (reportedRtt) recordNetworkRtt(reportedRtt, 'guest-report');
     return;
   }
+  if (message.type === 'state-check' && networkRole === 'guest') {
+    const frame = Math.max(0, Math.floor(Number(message.frame) || 0));
+    const expectedHash = String(message.hash || '');
+    const snapshot = rollbackSnapshots.find((candidate) => candidate.frame === frame);
+    if (snapshot) compareRollbackStateCheck(snapshot, expectedHash);
+    else {
+      pendingStateChecks.set(frame, expectedHash);
+      for (const pendingFrame of pendingStateChecks.keys()) {
+        if (pendingFrame < gameFrame - ROLLBACK_WINDOW_FRAMES) pendingStateChecks.delete(pendingFrame);
+      }
+    }
+    return;
+  }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
     const delayFrames = getNetworkInputDelayFrames();
-    const frame = gameFrame + delayFrames;
-    logNetworkEvent('input-request-received', { player: message.player, buttons: message.buttons || [], frame, delayFrames });
-    scheduleNetworkInput(message.player, message.buttons, frame);
-    sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
+    const requestedFrame = Math.max(0, Math.floor(Number(message.frame) || gameFrame));
+    const oldestRollbackFrame = rollbackSnapshots[0]?.frame ?? gameFrame;
+    const frame = requestedFrame >= oldestRollbackFrame && requestedFrame <= gameFrame + 2
+      ? requestedFrame
+      : gameFrame + delayFrames;
+    const id = String(message.id || `g-legacy-${++networkEventOrder}`);
+    const order = ++authoritativeInputOrder;
+    const scheduled = scheduleNetworkInput(message.player, message.buttons, frame, { id, order });
+    logNetworkEvent('input-request-received', {
+      player: message.player,
+      buttons: message.buttons || [],
+      requestedFrame,
+      frame,
+      id,
+      rolledBack: scheduled.rolledBack,
+      correctedFrame: frame !== requestedFrame,
+    });
+    sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame, id, order });
     return;
   }
   if (message.type === 'state-request' && networkRole === 'host') {
@@ -1099,7 +1341,10 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
-    const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame);
+    const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame, {
+      id: message.id,
+      order: message.order,
+    });
     logNetworkEvent('input-received', {
       player: message.player,
       buttons: message.buttons || [],
@@ -1107,8 +1352,12 @@ function handleNetworkMessage(message) {
       localFrame: gameFrame,
       targetFrame: scheduled.targetFrame,
       late: scheduled.late,
+      rolledBack: scheduled.rolledBack,
+      corrected: scheduled.corrected,
+      duplicate: scheduled.duplicate,
+      id: scheduled.id,
     });
-    if (scheduled.late) recoverFromLateNetworkInput({
+    if (scheduled.late && !scheduled.rolledBack) recoverFromLateNetworkInput({
       player: message.player,
       requestedFrame: scheduled.requestedFrame,
       localFrame: gameFrame,
@@ -1151,7 +1400,8 @@ function handleNetworkMessage(message) {
       suppressNetworkBroadcast = true;
       nes.fromJSON(decodeNetworkState(message.data));
       gameFrame = Number(message.frame) || 0;
-      scheduledNetworkInputs = [];
+      syncButtonSetsFromNes();
+      resetRollbackState({ capture: true, preserveInputsFromFrame: gameFrame });
       networkSyncPaused = true;
       syncButtonVisuals();
       sendPeerMessage({ type: 'state-applied', syncId: message.syncId || networkSyncId });
@@ -1172,7 +1422,8 @@ function handleNetworkMessage(message) {
       suppressNetworkBroadcast = true;
       nes.fromJSON(message.state);
       gameFrame = Number(message.frame) || 0;
-      scheduledNetworkInputs = [];
+      syncButtonSetsFromNes();
+      resetRollbackState({ capture: true, preserveInputsFromFrame: gameFrame });
       syncButtonVisuals();
     } catch (error) {
       console.warn(error);
@@ -1965,7 +2216,7 @@ function startRom(romData, name = 'NES 游戏') {
     nes = createNES();
     nes.loadROM(romData);
     gameFrame = 0;
-    scheduledNetworkInputs = [];
+    resetRollbackState({ capture: true });
     lastQueuedLocalButtons = new Set();
     hostClockFrame = null;
     lastStateRequestAt = 0;
@@ -2046,6 +2297,7 @@ function loop(timestamp) {
     suppressEmulatorOutput = true;
     try {
       for (let index = 0; index < catchUpFrames; index++) {
+        captureRollbackSnapshot();
         applyScheduledNetworkInputs();
         nes.frame();
         gameFrame++;
@@ -2065,6 +2317,7 @@ function loop(timestamp) {
   }
 
   while (elapsed >= FRAME_MS && frames < 3) {
+    captureRollbackSnapshot();
     applyScheduledNetworkInputs();
     nes.frame();
     gameFrame++;
