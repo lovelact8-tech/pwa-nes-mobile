@@ -1,7 +1,7 @@
 import './style.css';
 import { NES, Controller } from 'jsnes';
 import Peer from 'peerjs';
-import { unzipSync } from 'fflate';
+import { gzipSync, gunzipSync, strFromU8, strToU8, unzipSync } from 'fflate';
 
 const SCREEN_WIDTH = 256;
 const SCREEN_HEIGHT = 240;
@@ -13,7 +13,8 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // the host even on a LAN; the relay/PeerJS transport already queues packets.
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
-const HYBRID_DIRECT_TIMEOUT_MS = 8000;
+const HYBRID_DIRECT_TIMEOUT_MS = 5000;
+const NETWORK_SYNC_TIMEOUT_MS = 8000;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -115,6 +116,10 @@ let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
 let lastStateRequestAt = 0;
+let networkSyncPaused = false;
+let networkSyncId = '';
+let networkSyncTimeout = 0;
+let stateRequestInFlight = false;
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
 const RELAY_SERVER_URL = String(import.meta.env.VITE_RELAY_URL || '').trim();
 
@@ -487,6 +492,30 @@ function binaryStringToArrayBuffer(value) {
   return bytes.buffer;
 }
 
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function encodeNetworkState(state) {
+  return bytesToBase64(gzipSync(strToU8(JSON.stringify(state)), { level: 6 }));
+}
+
+function decodeNetworkState(value) {
+  return JSON.parse(strFromU8(gunzipSync(base64ToBytes(value))));
+}
+
 function sendTransportMessage(message) {
   if (networkTransport === 'relay') {
     if (message.type === 'rom') {
@@ -557,13 +586,49 @@ function applyScheduledNetworkInputs() {
   }
 }
 
-function sendPeerSnapshot() {
+function sendPeerSnapshot(syncId = '') {
   if (networkRole !== 'host' || !nes || !peerConnected) return;
   try {
-    sendPeerMessage({ type: 'state', state: nes.toJSON(), frame: gameFrame });
+    sendPeerMessage({
+      type: 'state-gzip',
+      data: encodeNetworkState(nes.toJSON()),
+      frame: gameFrame,
+      syncId,
+    });
   } catch (error) {
     console.warn(error);
   }
+}
+
+function clearNetworkSync() {
+  clearTimeout(networkSyncTimeout);
+  networkSyncTimeout = 0;
+  networkSyncId = '';
+  networkSyncPaused = false;
+  stateRequestInFlight = false;
+}
+
+function startHostStateSync(syncId) {
+  if (!syncId || networkSyncId) return;
+  networkSyncId = syncId;
+  networkSyncPaused = true;
+  sendPeerSnapshot(syncId);
+  networkSyncTimeout = window.setTimeout(() => {
+    if (networkSyncId !== syncId) return;
+    sendPeerMessage({ type: 'sync-start', syncId, frame: gameFrame });
+    clearNetworkSync();
+  }, NETWORK_SYNC_TIMEOUT_MS);
+}
+
+function requestInitialStateSync() {
+  if (networkRole !== 'guest' || stateRequestInFlight) return;
+  const syncId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  networkSyncId = syncId;
+  networkSyncPaused = true;
+  stateRequestInFlight = true;
+  lastStateRequestAt = performance.now();
+  setNetworkText('游戏已加载，正在同步 1P 进度...');
+  sendPeerMessage({ type: 'state-request', syncId });
 }
 
 function applyPeerRom(romData, name = 'NES 游戏') {
@@ -597,6 +662,7 @@ function teardownPeerConnection(finalStatus = '') {
   scheduledNetworkInputs = [];
   hostClockFrame = null;
   lastStateRequestAt = 0;
+  clearNetworkSync();
   lastNetworkClockAt = 0;
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
@@ -636,7 +702,8 @@ function markNetworkConnected() {
   if (peerConnected) return;
   peerConnected = true;
   flushPeerQueue();
-  setNetworkText(networkRole === 'host' ? '2P 已连接' : '已加入房间，等待 1P 选择游戏');
+  const route = networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连';
+  setNetworkText(networkRole === 'host' ? `2P 已连接（${route}）` : `已通过${route}加入，等待游戏同步`);
   updateNetworkButtons();
   if (networkRole === 'host' && lastRomData && !peerRomSent) {
     sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
@@ -653,7 +720,21 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'state-request' && networkRole === 'host') {
-    sendPeerSnapshot();
+    if (message.syncId) startHostStateSync(message.syncId);
+    else sendPeerSnapshot();
+    return;
+  }
+  if (message.type === 'state-applied' && networkRole === 'host' && message.syncId === networkSyncId) {
+    sendPeerMessage({ type: 'sync-start', syncId: networkSyncId, frame: gameFrame });
+    clearNetworkSync();
+    setNetworkText(`2P 同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
+    return;
+  }
+  if (message.type === 'sync-start' && networkRole === 'guest' && message.syncId === networkSyncId) {
+    clearNetworkSync();
+    lastTick = 0;
+    frameRemainder = 0;
+    setNetworkText(`同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
@@ -668,9 +749,27 @@ function handleNetworkMessage(message) {
   if (message.type === 'rom' && networkRole === 'guest') {
     applyPeerRom(message.data, message.name || 'NES 游戏');
     peerRomSent = true;
-    // Request the snapshot after the guest has loaded the ROM. This avoids
-    // the initial state arriving before the emulator exists on slower phones.
-    sendPeerMessage({ type: 'state-request' });
+    requestInitialStateSync();
+    return;
+  }
+  if (message.type === 'state-gzip' && nes && networkRole === 'guest') {
+    if (networkSyncId && message.syncId && message.syncId !== networkSyncId) return;
+    try {
+      suppressNetworkBroadcast = true;
+      nes.fromJSON(decodeNetworkState(message.data));
+      gameFrame = Number(message.frame) || 0;
+      scheduledNetworkInputs = [];
+      networkSyncPaused = true;
+      syncButtonVisuals();
+      sendPeerMessage({ type: 'state-applied', syncId: message.syncId || networkSyncId });
+      setNetworkText('进度已接收，正在同时开始...');
+    } catch (error) {
+      console.warn(error);
+      clearNetworkSync();
+      setNetworkText('同步状态读取失败，请重新加入房间');
+    } finally {
+      suppressNetworkBroadcast = false;
+    }
     return;
   }
   if (message.type === 'state' && nes && networkRole === 'guest') {
@@ -1475,6 +1574,13 @@ function stopLoop() {
 function loop(timestamp) {
   if (!running || !nes) return;
 
+  if (networkSyncPaused) {
+    lastTick = timestamp;
+    frameRemainder = 0;
+    rafId = requestAnimationFrame(loop);
+    return;
+  }
+
   if (!lastTick) lastTick = timestamp;
   const delta = Math.min(timestamp - lastTick, MAX_FRAME_DELTA_MS);
   let elapsed = delta + frameRemainder;
@@ -1500,13 +1606,6 @@ function loop(timestamp) {
   if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
     sendPeerMessage({ type: 'clock', frame: gameFrame });
-  }
-  if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
-    const drift = Math.abs(hostClockFrame - gameFrame);
-    if (drift > 45 && timestamp - lastStateRequestAt > 1200) {
-      lastStateRequestAt = timestamp;
-      sendPeerMessage({ type: 'state-request' });
-    }
   }
   rafId = requestAnimationFrame(loop);
 }
