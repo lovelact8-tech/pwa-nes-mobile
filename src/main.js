@@ -18,8 +18,8 @@ const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_JITTER_BUFFER_MS = 80;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 5;
+const RELAY_JITTER_BUFFER_MS = 50;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 4;
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
@@ -497,7 +497,8 @@ function getLocalMergedButtons() {
 }
 
 function syncButtonVisuals() {
-  const activeButtons = new Set([...buttonStateByPlayer[1], ...buttonStateByPlayer[2]]);
+  // The on-screen controller is local feedback. Remote input must not light it.
+  const activeButtons = getLocalMergedButtons();
   document.querySelectorAll('[data-btn]').forEach((element) => {
     const active = element.dataset.btn === 'AB'
       ? activeButtons.has('A') && activeButtons.has('B')
@@ -2284,11 +2285,12 @@ const keyboardMap = {
 };
 
 function syncLocalPlayerState() {
+  const next = getLocalMergedButtons();
+  syncButtonVisuals();
   if (suppressNetworkBroadcast) {
-    setPlayerButtons(localPlayer, getLocalMergedButtons(), { broadcast: false });
+    setPlayerButtons(localPlayer, next, { broadcast: false });
     return;
   }
-  const next = getLocalMergedButtons();
   if (networkRole === 'offline') {
     setPlayerButtons(localPlayer, next, { broadcast: false });
     return;
