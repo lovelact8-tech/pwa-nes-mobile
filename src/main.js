@@ -703,8 +703,21 @@ function getRelayGuestBufferFrames(rttMs = networkRttMs) {
 }
 
 function scheduleNetworkInput(player, buttons, frame) {
-  const targetFrame = Math.max(gameFrame, Number(frame) || gameFrame);
-  scheduledNetworkInputs = scheduledNetworkInputs.filter((input) => !(input.player === player && input.frame === targetFrame));
+  const requestedFrame = Number(frame) || gameFrame;
+  let targetFrame = Math.max(gameFrame + 1, requestedFrame);
+  const late = requestedFrame <= gameFrame;
+  if (late) {
+    // Preserve late key-down/key-up transitions instead of mapping every
+    // packet to the same frame (where the final key-up used to erase taps).
+    const lastQueuedFrame = scheduledNetworkInputs.reduce(
+      (latest, input) => input.player === player ? Math.max(latest, input.frame) : latest,
+      gameFrame,
+    );
+    targetFrame = Math.max(targetFrame, lastQueuedFrame + 1);
+  } else {
+    // A repeated state for the same future frame is safe to replace.
+    scheduledNetworkInputs = scheduledNetworkInputs.filter((input) => !(input.player === player && input.frame === targetFrame));
+  }
   scheduledNetworkInputs.push({ player, buttons: Array.from(buttons || []), frame: targetFrame });
   scheduledNetworkInputs.sort((a, b) => a.frame - b.frame);
 }
@@ -1019,6 +1032,8 @@ function handleNetworkMessage(message) {
   if (message.type === 'clock' && networkRole === 'guest') {
     hostClockFrame = Number(message.frame) || 0;
     hostClockReceivedAt = performance.now();
+    const hostRtt = Math.max(0, Math.min(5000, Number(message.rttMs) || 0));
+    if (hostRtt) networkRttMs = Math.max(networkRttMs, hostRtt);
     return;
   }
   if (message.type === 'rom-library' && networkRole === 'guest') {
@@ -1924,10 +1939,15 @@ function loop(timestamp) {
     const estimatedHostFrame = hostClockFrame + (transitEstimate + timestamp - hostClockReceivedAt) / FRAME_MS;
     const bufferFrames = getRelayGuestBufferFrames();
     const frameDifference = estimatedHostFrame - bufferFrames - gameFrame;
-    // Adjust playback by at most 12% instead of inserting/skipping whole
-    // frames whenever a delayed clock packet arrives. This keeps relay play
-    // smooth while gradually correcting small drift.
-    const correction = Math.max(-0.12, Math.min(0.12, frameDifference * 0.025));
+    // Keep the guest behind the host's timeline. Small drift is corrected
+    // gently, while a large lead is paused quickly; otherwise a delayed relay
+    // burst can leave the guest dozens of frames ahead and make every input
+    // arrive late.
+    const correction = frameDifference < -8
+      ? -1
+      : frameDifference > 8
+        ? 0.35
+        : Math.max(-0.12, Math.min(0.12, frameDifference * 0.025));
     elapsed = Math.max(0, elapsed + correction * FRAME_MS);
   }
 
@@ -1943,7 +1963,7 @@ function loop(timestamp) {
   lastTick = timestamp;
   if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
-    sendPeerMessage({ type: 'clock', frame: gameFrame });
+    sendPeerMessage({ type: 'clock', frame: gameFrame, rttMs: Math.round(networkRttMs) });
   }
   if (networkPingId && performance.now() - networkPingSentAt > 5000) {
     logNetworkEvent('network-ping-timeout');
