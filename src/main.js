@@ -35,6 +35,7 @@ const game = document.querySelector('#game');
 const canvas = document.querySelector('#screen');
 const ctx = canvas.getContext('2d');
 const remoteStreamVideo = document.querySelector('#remoteStream');
+const remoteStreamAudio = document.querySelector('#remoteStreamAudio');
 const imageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 const frameBuffer32 = new Uint32Array(imageData.data.buffer);
 
@@ -170,6 +171,7 @@ let streamPeerConnection = null;
 let streamInputChannel = null;
 let streamLocalMedia = null;
 let streamRemoteMedia = null;
+let streamRemoteAudioMedia = null;
 let streamPendingIce = [];
 let streamInputSequence = 0;
 let streamLastRemoteInputSequence = 0;
@@ -178,6 +180,8 @@ let streamConnectTimeout = 0;
 let streamGuestWasRunning = false;
 let streamFirstFrameReady = false;
 let streamReadySent = false;
+let streamStatsTimer = 0;
+let streamStatsSummary = null;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -488,6 +492,7 @@ function getNetworkDiagnosticLog() {
     `streamIce=${streamPeerConnection?.iceConnectionState || 'none'}`,
     `streamInput=${streamInputChannel?.readyState || 'none'}`,
     `streamVideo=${remoteStreamVideo?.readyState ?? 'none'}`,
+    `streamStats=${streamStatsSummary ? JSON.stringify(streamStatsSummary) : 'none'}`,
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
     `rttMs=${Math.round(networkRttMs)}`,
@@ -535,9 +540,10 @@ function getStreamRtcConfig() {
 function maybeMarkRemoteStreamReady() {
   if (streamReadySent || !streamFirstFrameReady || streamPeerConnection?.connectionState !== 'connected') return;
   streamReadySent = true;
-  setNetworkText(remoteStreamVideo.muted ? '权威画面已同步，点一下手柄开启声音' : '已进入 1P 权威画面，2P 手柄可操作');
-  sendPeerMessage({ type: 'stream-ready', muted: remoteStreamVideo.muted });
-  logNetworkEvent('stream-first-frame', { muted: remoteStreamVideo.muted, width: remoteStreamVideo.videoWidth, height: remoteStreamVideo.videoHeight });
+  const audioMuted = remoteStreamAudio.muted || remoteStreamAudio.paused;
+  setNetworkText(audioMuted ? '权威画面已同步，点一下手柄开启声音' : '已进入 1P 权威画面，2P 手柄可操作');
+  sendPeerMessage({ type: 'stream-ready', muted: audioMuted });
+  logNetworkEvent('stream-first-frame', { muted: audioMuted, width: remoteStreamVideo.videoWidth, height: remoteStreamVideo.videoHeight });
 }
 
 function armRemoteFirstFrameCheck() {
@@ -612,27 +618,67 @@ function showRemoteStream(stream) {
   if (running) stopLoop();
   showGame();
   remoteStreamVideo.srcObject = stream;
-  remoteStreamVideo.muted = false;
+  remoteStreamVideo.muted = true;
   remoteStreamVideo.classList.remove('hidden');
   updateSoundButton();
   armRemoteFirstFrameCheck();
-  const playPromise = remoteStreamVideo.play();
-  playPromise?.catch(() => {
-    remoteStreamVideo.muted = true;
+  remoteStreamVideo.play().catch(() => {
+    setNetworkText('正在等待 1P 权威画面，请点一下手柄继续');
+  });
+}
+
+function attachRemoteAudio(track) {
+  streamRemoteAudioMedia = new MediaStream([track]);
+  remoteStreamAudio.srcObject = streamRemoteAudioMedia;
+  remoteStreamAudio.muted = false;
+  remoteStreamAudio.play().then(updateSoundButton).catch(() => {
+    remoteStreamAudio.muted = true;
     updateSoundButton();
-    remoteStreamVideo.play().catch(() => {});
-    setNetworkText('正在等待 1P 权威画面，连接后点手柄开启声音');
   });
 }
 
 function unlockRemoteStreamAudio(event) {
   if (networkRole !== 'guest' || remoteStreamVideo.classList.contains('hidden')) return;
   if (event?.target?.closest?.('#soundBtn')) return;
-  remoteStreamVideo.muted = false;
+  remoteStreamAudio.muted = false;
   updateSoundButton();
-  remoteStreamVideo.play().then(() => {
+  remoteStreamAudio.play().then(() => {
     setNetworkText('已进入 1P 权威画面，2P 手柄可操作');
   }).catch(() => {});
+}
+
+async function collectStreamStats() {
+  if (!streamPeerConnection || streamPeerConnection.connectionState !== 'connected') return;
+  try {
+    const reports = await streamPeerConnection.getStats();
+    const byId = new Map();
+    reports.forEach((report) => byId.set(report.id, report));
+    const summary = { role: networkRole };
+    reports.forEach((report) => {
+      if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        summary.fps = Math.round(Number(report.framesPerSecond) || 0);
+        summary.decoded = Number(report.framesDecoded) || 0;
+        summary.dropped = Number(report.framesDropped) || 0;
+        summary.jitterMs = Math.round((Number(report.jitter) || 0) * 1000);
+        const emitted = Number(report.jitterBufferEmittedCount) || 0;
+        summary.playoutMs = emitted ? Math.round((Number(report.jitterBufferDelay) || 0) * 1000 / emitted) : 0;
+      }
+      if (report.type === 'outbound-rtp' && report.kind === 'video') {
+        summary.fps = Math.round(Number(report.framesPerSecond) || 0);
+        summary.sent = Number(report.framesSent) || 0;
+        summary.quality = report.qualityLimitationReason || 'none';
+      }
+      if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
+        summary.rttMs = Math.round((Number(report.currentRoundTripTime) || 0) * 1000);
+        summary.availableKbps = Math.round((Number(report.availableOutgoingBitrate) || Number(report.availableIncomingBitrate) || 0) / 1000);
+        summary.localCandidate = byId.get(report.localCandidateId)?.candidateType || '';
+        summary.remoteCandidate = byId.get(report.remoteCandidateId)?.candidateType || '';
+      }
+    });
+    streamStatsSummary = summary;
+  } catch (error) {
+    logNetworkEvent('stream-stats-error', { message: error?.message || String(error) });
+  }
 }
 
 function createStreamPeerConnection() {
@@ -652,6 +698,9 @@ function createStreamPeerConnection() {
       clearTimeout(streamConnectTimeout);
       streamConnectTimeout = 0;
       maybeMarkRemoteStreamReady();
+      clearInterval(streamStatsTimer);
+      collectStreamStats();
+      streamStatsTimer = window.setInterval(collectStreamStats, 3000);
     } else if (['failed', 'disconnected'].includes(connection.connectionState)) {
       setNetworkText('权威串流连接中断，请重新加入房间');
     }
@@ -665,10 +714,13 @@ function createStreamPeerConnection() {
       } catch (error) {
         // These low-latency receiver hints are optional and browser-specific.
       }
-      const stream = event.streams?.[0] || streamRemoteMedia || new MediaStream();
-      if (!event.streams?.[0]) stream.addTrack(event.track);
-      showRemoteStream(stream);
-      logNetworkEvent('stream-track-received', { kind: event.track.kind, tracks: stream.getTracks().length });
+      if (event.track.kind === 'video') {
+        const stream = new MediaStream([event.track]);
+        showRemoteStream(stream);
+      } else if (event.track.kind === 'audio') {
+        attachRemoteAudio(event.track);
+      }
+      logNetworkEvent('stream-track-received', { kind: event.track.kind });
     };
   }
   return connection;
@@ -704,11 +756,20 @@ async function startHostAuthoritativeStream() {
   if (videoTrack) {
     videoTrack.contentHint = 'motion';
     const sender = connection.addTrack(videoTrack, streamLocalMedia);
-    sender.setParameters({
-      ...sender.getParameters(),
-      degradationPreference: 'maintain-framerate',
-      encodings: [{ maxBitrate: 1_500_000, maxFramerate: 60, priority: 'high', networkPriority: 'high' }],
-    }).catch(() => {});
+    const transceiver = connection.getTransceivers().find((candidate) => candidate.sender === sender);
+    const codecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs || [];
+    const h264 = codecs.filter((codec) => codec.mimeType?.toLowerCase() === 'video/h264');
+    if (transceiver?.setCodecPreferences && h264.length) {
+      transceiver.setCodecPreferences([...h264, ...codecs.filter((codec) => !h264.includes(codec))]);
+    }
+    const parameters = sender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    parameters.encodings[0].maxBitrate = 800_000;
+    parameters.encodings[0].maxFramerate = 60;
+    parameters.degradationPreference = 'maintain-framerate';
+    sender.setParameters(parameters)
+      .then(() => logNetworkEvent('stream-video-parameters', { maxBitrate: 800000, maxFramerate: 60, codec: h264.length ? 'H264-first' : 'browser-default' }))
+      .catch((error) => logNetworkEvent('stream-video-parameters-error', { message: error?.message || String(error) }));
   }
   for (const track of streamAudioDestination?.stream?.getAudioTracks?.() || []) {
     streamLocalMedia.addTrack(track);
@@ -768,6 +829,9 @@ function teardownStreamSession({ restoreLocalGame = true } = {}) {
   streamConnectTimeout = 0;
   clearInterval(streamInputHeartbeat);
   streamInputHeartbeat = 0;
+  clearInterval(streamStatsTimer);
+  streamStatsTimer = 0;
+  streamStatsSummary = null;
   if (streamInputChannel) {
     streamInputChannel.onclose = null;
     streamInputChannel.close?.();
@@ -778,6 +842,7 @@ function teardownStreamSession({ restoreLocalGame = true } = {}) {
   streamLocalMedia?.getVideoTracks?.().forEach((track) => track.stop());
   streamLocalMedia = null;
   streamRemoteMedia = null;
+  streamRemoteAudioMedia = null;
   streamPendingIce = [];
   streamInputSequence = 0;
   streamLastRemoteInputSequence = 0;
@@ -787,6 +852,11 @@ function teardownStreamSession({ restoreLocalGame = true } = {}) {
     remoteStreamVideo.pause?.();
     remoteStreamVideo.srcObject = null;
     remoteStreamVideo.classList.add('hidden');
+  }
+  if (remoteStreamAudio) {
+    remoteStreamAudio.pause?.();
+    remoteStreamAudio.srcObject = null;
+    remoteStreamAudio.muted = true;
   }
   if (restoreLocalGame && streamGuestWasRunning && nes && !running) {
     running = true;
@@ -2524,7 +2594,7 @@ function clearAudioBuffer() {
 
 function updateSoundButton() {
   if (isAuthoritativeStreamMode() && networkRole === 'guest' && !remoteStreamVideo.classList.contains('hidden')) {
-    soundBtn.textContent = remoteStreamVideo.muted ? '开声' : '有声';
+    soundBtn.textContent = remoteStreamAudio.muted || remoteStreamAudio.paused ? '开声' : '有声';
     return;
   }
   if (!audioCtx) {
@@ -2872,8 +2942,8 @@ pauseBtn.addEventListener('click', () => {
 
 soundBtn.addEventListener('click', () => {
   if (isAuthoritativeStreamMode() && networkRole === 'guest' && !remoteStreamVideo.classList.contains('hidden')) {
-    remoteStreamVideo.muted = !remoteStreamVideo.muted;
-    if (!remoteStreamVideo.muted) remoteStreamVideo.play().catch(() => {});
+    remoteStreamAudio.muted = !remoteStreamAudio.muted;
+    if (!remoteStreamAudio.muted) remoteStreamAudio.play().catch(() => {});
     updateSoundButton();
     return;
   }
