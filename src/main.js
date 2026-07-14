@@ -14,12 +14,15 @@ const MAX_PEER_QUEUE_SIZE = 32;
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
-// Relay guests intentionally run behind the host by roughly one-way latency.
-// This gives host inputs time to arrive before the guest reaches the matching
-// frame, without making the host wait for a high-latency round trip.
-const RELAY_JITTER_BUFFER_MS = 250;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 12;
-const RELAY_MAX_GUEST_BUFFER_FRAMES = 120;
+// Relay guests intentionally run a little behind the host so authoritative
+// inputs arrive before the guest reaches their frame. Keep this buffer small:
+// Tailscale can begin on DERP and switch to a much faster direct route later.
+const DEFAULT_NETWORK_RTT_MS = 250;
+const RELAY_JITTER_BUFFER_MS = 80;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 5;
+const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
+const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
+const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -139,6 +142,7 @@ let networkRttMs = 0;
 let networkPingId = '';
 let networkPingSentAt = 0;
 let lastNetworkPingAt = 0;
+let lastGuestCatchUpLogAt = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -446,6 +450,9 @@ function getNetworkDiagnosticLog() {
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
     `rttMs=${Math.round(networkRttMs)}`,
+    `guestBufferFrames=${getRelayGuestBufferFrames()}`,
+    `gameFrame=${gameFrame}`,
+    `hostFrame=${hostClockFrame ?? 'none'}`,
     `userAgent=${navigator.userAgent}`,
     '',
     ...networkLogEntries,
@@ -693,9 +700,31 @@ function getNetworkInputDelayFrames() {
   return NET_INPUT_DELAY_FRAMES;
 }
 
+function recordNetworkRtt(sampleMs, source = 'ping') {
+  const parsedSample = Number(sampleMs);
+  if (!Number.isFinite(parsedSample) || parsedSample <= 0) return networkRttMs;
+  const sample = Math.max(1, Math.min(5000, parsedSample));
+  if (!networkRttMs) {
+    networkRttMs = sample;
+  } else {
+    // A route commonly starts on DERP and then becomes direct. Fall quickly
+    // when that happens, but increase slowly for isolated mobile-network
+    // spikes so one bad packet cannot add a permanent second of buffering.
+    const weight = sample < networkRttMs ? 0.65 : 0.2;
+    networkRttMs += (sample - networkRttMs) * weight;
+  }
+  logNetworkEvent('network-rtt', {
+    source,
+    sampleMs: Math.round(sample),
+    smoothedMs: Math.round(networkRttMs),
+    bufferFrames: getRelayGuestBufferFrames(networkRttMs),
+  });
+  return networkRttMs;
+}
+
 function getRelayGuestBufferFrames(rttMs = networkRttMs) {
   if (networkTransport !== 'relay') return 1;
-  const rtt = rttMs > 0 ? rttMs : 1000;
+  const rtt = rttMs > 0 ? rttMs : DEFAULT_NETWORK_RTT_MS;
   return Math.max(
     RELAY_MIN_GUEST_BUFFER_FRAMES,
     Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + RELAY_JITTER_BUFFER_MS) / FRAME_MS)),
@@ -884,6 +913,7 @@ function teardownPeerConnection(finalStatus = '') {
   networkPingId = '';
   networkPingSentAt = 0;
   lastNetworkPingAt = 0;
+  lastGuestCatchUpLogAt = 0;
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
@@ -952,17 +982,16 @@ function handleNetworkMessage(message) {
   }
   if (message.type === 'pong' && networkRole === 'guest' && message.id === networkPingId) {
     const measuredRtt = Math.max(0, performance.now() - networkPingSentAt);
-    networkRttMs = networkRttMs ? networkRttMs * 0.75 + measuredRtt * 0.25 : measuredRtt;
     networkPingId = '';
     hostClockFrame = Number(message.frame) || hostClockFrame;
     hostClockReceivedAt = performance.now();
-    logNetworkEvent('network-rtt', { ms: Math.round(networkRttMs) });
+    recordNetworkRtt(measuredRtt);
     sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
     return;
   }
   if (message.type === 'latency-report' && networkRole === 'host') {
     const reportedRtt = Math.max(0, Math.min(5000, Number(message.rttMs) || 0));
-    if (reportedRtt) networkRttMs = reportedRtt;
+    if (reportedRtt) recordNetworkRtt(reportedRtt, 'guest-report');
     return;
   }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
@@ -1012,9 +1041,9 @@ function handleNetworkMessage(message) {
   if (message.type === 'sync-frame' && networkRole === 'guest'
     && message.syncId === networkSyncId && message.probeId === networkSyncProbeId) {
     const probeRtt = Math.max(0, performance.now() - networkSyncProbeSentAt);
-    networkRttMs = networkRttMs ? networkRttMs * 0.5 + probeRtt * 0.5 : probeRtt;
+    recordNetworkRtt(probeRtt, 'sync-probe');
     const transitFrames = Math.max(0, Math.round((probeRtt / 2) / FRAME_MS));
-    const bufferFrames = getRelayGuestBufferFrames(probeRtt);
+    const bufferFrames = getRelayGuestBufferFrames();
     const targetFrame = Math.max(gameFrame, (Number(message.frame) || gameFrame) + transitFrames - bufferFrames);
     sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
     finishGuestStateSync(targetFrame, {
@@ -1032,8 +1061,6 @@ function handleNetworkMessage(message) {
   if (message.type === 'clock' && networkRole === 'guest') {
     hostClockFrame = Number(message.frame) || 0;
     hostClockReceivedAt = performance.now();
-    const hostRtt = Math.max(0, Math.min(5000, Number(message.rttMs) || 0));
-    if (hostRtt) networkRttMs = Math.max(networkRttMs, hostRtt);
     return;
   }
   if (message.type === 'rom-library' && networkRole === 'guest') {
@@ -1934,11 +1961,13 @@ function loop(timestamp) {
   let elapsed = delta + frameRemainder;
   let frames = 0;
 
+  let guestFrameDifference = 0;
   if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
     const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
     const estimatedHostFrame = hostClockFrame + (transitEstimate + timestamp - hostClockReceivedAt) / FRAME_MS;
     const bufferFrames = getRelayGuestBufferFrames();
     const frameDifference = estimatedHostFrame - bufferFrames - gameFrame;
+    guestFrameDifference = frameDifference;
     // Keep the guest behind the host's timeline. Small drift is corrected
     // gently, while a large lead is paused quickly; otherwise a delayed relay
     // burst can leave the guest dozens of frames ahead and make every input
@@ -1949,6 +1978,32 @@ function loop(timestamp) {
         ? 0.35
         : Math.max(-0.12, Math.min(0.12, frameDifference * 0.025));
     elapsed = Math.max(0, elapsed + correction * FRAME_MS);
+  }
+
+  if (guestFrameDifference > GUEST_FAST_CATCHUP_THRESHOLD_FRAMES) {
+    const catchUpFrames = Math.min(
+      GUEST_FAST_CATCHUP_MAX_FRAMES,
+      Math.max(1, Math.floor(guestFrameDifference - GUEST_FAST_CATCHUP_THRESHOLD_FRAMES / 2)),
+    );
+    suppressEmulatorOutput = true;
+    try {
+      for (let index = 0; index < catchUpFrames; index++) {
+        applyScheduledNetworkInputs();
+        nes.frame();
+        gameFrame++;
+      }
+    } finally {
+      suppressEmulatorOutput = false;
+      clearAudioBuffer();
+    }
+    if (timestamp - lastGuestCatchUpLogAt >= 1000) {
+      lastGuestCatchUpLogAt = timestamp;
+      logNetworkEvent('guest-fast-catchup', {
+        frames: catchUpFrames,
+        frameDifference: Math.round(guestFrameDifference),
+        bufferFrames: getRelayGuestBufferFrames(),
+      });
+    }
   }
 
   while (elapsed >= FRAME_MS && frames < 3) {
@@ -1963,13 +2018,14 @@ function loop(timestamp) {
   lastTick = timestamp;
   if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
-    sendPeerMessage({ type: 'clock', frame: gameFrame, rttMs: Math.round(networkRttMs) });
+    sendPeerMessage({ type: 'clock', frame: gameFrame });
   }
   if (networkPingId && performance.now() - networkPingSentAt > 5000) {
     logNetworkEvent('network-ping-timeout');
     networkPingId = '';
   }
-  if (networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= 2000) {
+  const pingInterval = networkRttMs ? 2000 : 750;
+  if (networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= pingInterval) {
     lastNetworkPingAt = timestamp;
     networkPingSentAt = performance.now();
     networkPingId = `${Math.round(networkPingSentAt).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
