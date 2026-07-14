@@ -13,6 +13,7 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // the host even on a LAN; the relay/PeerJS transport already queues packets.
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
+const HYBRID_DIRECT_TIMEOUT_MS = 8000;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -99,6 +100,9 @@ let relaySocket = null;
 let relayReady = false;
 let relayPendingRomName = '';
 let relayGuestTicket = '';
+let hybridRoom = false;
+let hybridFallbackTimer = 0;
+let hybridFallbackStarted = false;
 let peerPendingMessages = [];
 let peerRomSent = false;
 let pendingPeerRomData = null;
@@ -378,7 +382,10 @@ function getInviteUrl() {
   const url = new URL(window.location.href);
   url.searchParams.set('room', roomId);
   url.searchParams.delete('host');
-  if (networkTransport === 'relay') {
+  if (hybridRoom) {
+    url.searchParams.set('transport', 'hybrid');
+    if (relayGuestTicket) url.searchParams.set('ticket', relayGuestTicket);
+  } else if (networkTransport === 'relay') {
     url.searchParams.set('transport', 'relay');
     if (relayGuestTicket) url.searchParams.set('ticket', relayGuestTicket);
   } else {
@@ -571,9 +578,9 @@ function updateNetworkButtons() {
   if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间';
   if (relayHostBtn) {
     relayHostBtn.classList.toggle('hidden', !RELAY_SERVER_URL);
-    relayHostBtn.textContent = networkRole === 'host' && networkTransport === 'relay' && relayReady ? '跨网房间已创建' : '创建跨网房间';
+    relayHostBtn.textContent = networkRole === 'host' && hybridRoom && (relayReady || peerReady) ? '跨网房间已创建' : '创建跨网房间（直连优先）';
     relayHostBtn.disabled = active || !RELAY_SERVER_URL;
-    relayHostBtn.title = RELAY_SERVER_URL ? '通过私有公网中继连接异地玩家' : '公网中继尚未部署';
+    relayHostBtn.title = RELAY_SERVER_URL ? '先尝试 WebRTC 直连，失败后使用私有公网中继' : '公网中继尚未部署';
   }
   relayAccessRow?.classList.toggle('hidden', !RELAY_SERVER_URL || active);
   if (netHostBtn) netHostBtn.disabled = active;
@@ -597,6 +604,9 @@ function teardownPeerConnection(finalStatus = '') {
 }
 
 function teardownPeer() {
+  clearTimeout(hybridFallbackTimer);
+  hybridFallbackTimer = 0;
+  hybridFallbackStarted = false;
   teardownPeerConnection();
   peer?.destroy?.();
   peer = null;
@@ -610,6 +620,16 @@ function teardownPeer() {
   relayReady = false;
   relayPendingRomName = '';
   relayGuestTicket = '';
+}
+
+function closeRelaySocketSilently() {
+  const socket = relaySocket;
+  relaySocket = null;
+  relayReady = false;
+  if (!socket) return;
+  socket.onclose = null;
+  socket.onerror = null;
+  socket.close();
 }
 
 function markNetworkConnected() {
@@ -668,24 +688,33 @@ function handleNetworkMessage(message) {
   }
 }
 
-function configurePeerConnection(connection) {
+function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
   peerConnection = connection;
   const connectionTimeout = window.setTimeout(() => {
     if (!connection.open) setNetworkText('连接超时：请确认 1P 房间仍然开启，并检查双方网络');
   }, 12000);
   connection.on('open', () => {
     clearTimeout(connectionTimeout);
+    if (onOpen?.() === false) {
+      connection.__nesIgnore = true;
+      connection.close();
+      return;
+    }
     markNetworkConnected();
   });
   connection.on('data', handleNetworkMessage);
   connection.on('close', () => {
     clearTimeout(connectionTimeout);
+    if (connection.__nesIgnore) return;
     teardownPeerConnection();
+    onFailure?.();
   });
   connection.on('error', (error) => {
     clearTimeout(connectionTimeout);
+    if (connection.__nesIgnore) return;
     console.warn(error);
     teardownPeerConnection(getPeerErrorText('联机连接', error));
+    onFailure?.();
   });
 }
 
@@ -722,6 +751,7 @@ function createPeerRoom(nextRoomId) {
   }
   nextRoomId ||= generateRoomId();
   teardownPeer();
+  hybridRoom = false;
   roomId = nextRoomId;
   networkTransport = 'peer';
   localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'host', roomId, transport: 'peer' }));
@@ -755,6 +785,36 @@ function createPeerRoom(nextRoomId) {
   });
 }
 
+function startHybridHostPeer(nextRoomId) {
+  if (typeof Peer !== 'function') return;
+  peer = new Peer(nextRoomId);
+  peer.on('open', () => {
+    peerReady = true;
+    refreshInviteLink();
+    updateNetworkButtons();
+  });
+  peer.on('connection', (connection) => {
+    if (peerConnected) {
+      connection.close();
+      return;
+    }
+    configurePeerConnection(connection, {
+      onOpen: () => {
+        if (peerConnected && networkTransport === 'relay') return false;
+        networkTransport = 'peer';
+        // Direct connection succeeded; keep the private relay from carrying
+        // game traffic or accepting a second guest.
+        closeRelaySocketSilently();
+      },
+    });
+  });
+  peer.on('error', (error) => {
+    // The relay stays available, so a direct-host registration failure is not
+    // fatal for a cross-network room.
+    console.warn('直连候选不可用，将继续等待中继加入', error);
+  });
+}
+
 function joinPeerRoom(nextRoomId) {
   if (typeof Peer !== 'function') {
     setNetworkText('联机库未加载');
@@ -763,6 +823,7 @@ function joinPeerRoom(nextRoomId) {
   nextRoomId = String(nextRoomId || '').trim();
   if (!nextRoomId) return;
   teardownPeer();
+  hybridRoom = false;
   roomId = nextRoomId;
   networkTransport = 'peer';
   localStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify({ role: 'guest', roomId, transport: 'peer' }));
@@ -920,6 +981,87 @@ async function createRelayRoom(nextRoomId) {
   }
 }
 
+async function createHybridRoom(nextRoomId) {
+  const accessKey = relayAccessKey?.value || '';
+  if (!accessKey) {
+    setNetworkText('请先输入私人联机访问码');
+    relayAccessKey?.focus();
+    return;
+  }
+  const nextRoom = nextRoomId || generateRoomId();
+  setNetworkText('正在创建跨网房间...');
+  try {
+    const tickets = await requestRelayTickets(nextRoom, accessKey);
+    if (relayAccessKey) relayAccessKey.value = '';
+    // Bring the private relay online first, then also register a PeerJS host.
+    // The guest will prefer that direct connection and use this relay only if
+    // direct negotiation does not finish in time.
+    connectRelay('host', nextRoom, tickets.hostToken, tickets.guestToken);
+    hybridRoom = true;
+    startHybridHostPeer(nextRoom);
+    refreshInviteLink();
+    updateNetworkButtons();
+  } catch (error) {
+    console.warn(error);
+    setNetworkText(error.message || '无法创建跨网房间');
+  }
+}
+
+function joinHybridRoom(nextRoomId, ticket) {
+  if (!ticket) {
+    setNetworkText('跨网邀请链接不完整，请让 1P 重新复制链接');
+    return;
+  }
+  if (typeof Peer !== 'function') {
+    hybridRoom = true;
+    joinRelayRoom(nextRoomId, ticket);
+    return;
+  }
+  teardownPeer();
+  hybridRoom = true;
+  roomId = String(nextRoomId || '').trim();
+  networkTransport = 'peer';
+  networkRole = 'guest';
+  localPlayer = 2;
+  remotePlayer = 1;
+  peer = new Peer();
+  setNetworkText('正在尝试直连 1P...');
+  updateNetworkButtons();
+
+  const useRelayFallback = () => {
+    if (peerConnected || hybridFallbackStarted) return;
+    hybridFallbackStarted = true;
+    clearTimeout(hybridFallbackTimer);
+    hybridFallbackTimer = 0;
+    peer?.destroy?.();
+    peer = null;
+    peerReady = false;
+    hybridRoom = true;
+    setNetworkText('直连不可用，正在切换私有中继...');
+    connectRelay('guest', roomId, ticket);
+    hybridRoom = true;
+  };
+
+  hybridFallbackTimer = window.setTimeout(useRelayFallback, HYBRID_DIRECT_TIMEOUT_MS);
+  peer.on('open', () => {
+    peerReady = true;
+    const connection = peer.connect(roomId, { reliable: true });
+    configurePeerConnection(connection, {
+      onOpen: () => {
+        clearTimeout(hybridFallbackTimer);
+        hybridFallbackTimer = 0;
+        networkTransport = 'peer';
+        setNetworkText('已通过直连加入房间');
+      },
+      onFailure: useRelayFallback,
+    });
+  });
+  peer.on('error', (error) => {
+    console.warn('直连失败，准备使用中继', error);
+    useRelayFallback();
+  });
+}
+
 function joinRelayRoom(nextRoomId, ticket) {
   if (nextRoomId) connectRelay('guest', nextRoomId, ticket);
 }
@@ -943,9 +1085,11 @@ function getRoomIdFromInput(value) {
 function getTransportFromInput(value) {
   try {
     const url = new URL(String(value || '').trim(), window.location.href);
+    const transport = url.searchParams.get('transport');
+    if (transport === 'hybrid') return 'hybrid';
     // A relay ticket is authoritative. This prevents a copied/truncated
     // transport parameter from silently falling back to direct WebRTC.
-    return url.searchParams.get('transport') === 'relay' || url.searchParams.has('ticket') ? 'relay' : 'peer';
+    return transport === 'relay' || url.searchParams.has('ticket') ? 'relay' : 'peer';
   } catch (error) {
     return 'peer';
   }
@@ -964,8 +1108,8 @@ function enterGuestRoom(nextRoomId, transport = 'peer', ticket = '') {
   const url = new URL(window.location.href);
   url.searchParams.set('room', nextRoomId);
   url.searchParams.delete('host');
-  if (transport === 'relay') {
-    url.searchParams.set('transport', 'relay');
+  if (transport === 'relay' || transport === 'hybrid') {
+    url.searchParams.set('transport', transport);
     if (ticket) url.searchParams.set('ticket', ticket);
   } else {
     url.searchParams.delete('transport');
@@ -974,7 +1118,8 @@ function enterGuestRoom(nextRoomId, transport = 'peer', ticket = '') {
   window.history.replaceState({}, '', url);
   ensureDemoScreen();
   setStatus('正在连接 1P 房间...');
-  if (transport === 'relay') joinRelayRoom(nextRoomId, ticket);
+  if (transport === 'hybrid') joinHybridRoom(nextRoomId, ticket);
+  else if (transport === 'relay') joinRelayRoom(nextRoomId, ticket);
   else joinPeerRoom(nextRoomId);
 }
 
@@ -985,7 +1130,7 @@ function restoreNetworkRoom() {
     const validRoom = getRoomIdFromInput(nextRoom);
     if (validRoom) enterGuestRoom(
       validRoom,
-      params.get('transport') === 'relay' ? 'relay' : 'peer',
+      params.get('transport') === 'hybrid' ? 'hybrid' : params.get('transport') === 'relay' ? 'relay' : 'peer',
       params.get('ticket') || '',
     );
     else {
@@ -1395,7 +1540,7 @@ joinRoomForm.addEventListener('submit', (event) => {
   }
   const transport = getTransportFromInput(joinRoomInput.value);
   const ticket = getRelayTicketFromInput(joinRoomInput.value);
-  if (transport === 'relay' && !ticket) {
+  if ((transport === 'relay' || transport === 'hybrid') && !ticket) {
     inviteStatusText.textContent = '跨网邀请链接不完整：请让 1P 重新复制完整链接';
     inviteStatusText.classList.remove('hidden');
     return;
@@ -1501,7 +1646,7 @@ netHostBtn.addEventListener('click', () => {
   createPeerRoom();
   refreshInviteLink();
 });
-relayHostBtn.addEventListener('click', () => createRelayRoom());
+relayHostBtn.addEventListener('click', () => createHybridRoom());
 netCopyBtn.addEventListener('click', async () => {
   const url = getInviteUrl();
   if (!url) return;
@@ -1517,6 +1662,7 @@ netCopyBtn.addEventListener('click', async () => {
 });
 netLeaveBtn.addEventListener('click', () => {
   teardownPeer();
+  hybridRoom = false;
   roomId = '';
   networkRole = 'offline';
   networkTransport = 'peer';
