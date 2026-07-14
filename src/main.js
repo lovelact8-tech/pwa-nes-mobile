@@ -102,6 +102,7 @@ let peerConnected = false;
 let relaySocket = null;
 let relayReady = false;
 let relayPendingRomName = '';
+let relayPendingRomEncoding = '';
 let relayGuestTicket = '';
 let relayDataQueue = Promise.resolve();
 let hybridRoom = false;
@@ -571,8 +572,13 @@ function decodeNetworkState(value) {
 function sendTransportMessage(message) {
   if (networkTransport === 'relay') {
     if (message.type === 'rom') {
-      relaySocket.send(JSON.stringify({ __nes: 'rom', name: message.name || 'NES 游戏' }));
-      relaySocket.send(binaryStringToArrayBuffer(message.data));
+      const rawBytes = new Uint8Array(binaryStringToArrayBuffer(message.data));
+      const compressedBytes = gzipSync(rawBytes, { level: 6 });
+      const useCompressed = compressedBytes.length < rawBytes.length;
+      const payload = useCompressed ? compressedBytes : rawBytes;
+      logNetworkEvent('relay-rom-send', { rawBytes: rawBytes.length, wireBytes: payload.length, encoding: useCompressed ? 'gzip' : 'raw' });
+      relaySocket.send(JSON.stringify({ __nes: 'rom', name: message.name || 'NES 游戏', encoding: useCompressed ? 'gzip' : 'raw' }));
+      relaySocket.send(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
       return;
     }
     relaySocket.send(JSON.stringify(message));
@@ -741,6 +747,7 @@ function teardownPeer() {
   relaySocket = null;
   relayReady = false;
   relayPendingRomName = '';
+  relayPendingRomEncoding = '';
   relayGuestTicket = '';
   relayDataQueue = Promise.resolve();
 }
@@ -1111,8 +1118,13 @@ async function handleRelayData(data) {
       return;
     }
     const name = relayPendingRomName;
+    const encoding = relayPendingRomEncoding;
     relayPendingRomName = '';
-    handleNetworkMessage({ type: 'rom', name, data: arrayBufferToBinary(data) });
+    relayPendingRomEncoding = '';
+    const wireBytes = new Uint8Array(data);
+    const romBytes = encoding === 'gzip' ? gunzipSync(wireBytes) : wireBytes;
+    logNetworkEvent('relay-rom-decoded', { encoding: encoding || 'raw', wireBytes: wireBytes.length, romBytes: romBytes.length });
+    handleNetworkMessage({ type: 'rom', name, data: arrayBufferToBinary(romBytes) });
     return;
   }
   if (typeof data !== 'string') return;
@@ -1121,7 +1133,8 @@ async function handleRelayData(data) {
     if (handleRelayControl(message)) return;
     if (message.__nes === 'rom') {
       relayPendingRomName = message.name || 'NES 游戏';
-      logNetworkEvent('relay-rom-header', { name: relayPendingRomName });
+      relayPendingRomEncoding = message.encoding || 'raw';
+      logNetworkEvent('relay-rom-header', { name: relayPendingRomName, encoding: relayPendingRomEncoding });
       return;
     }
     handleNetworkMessage(message);
