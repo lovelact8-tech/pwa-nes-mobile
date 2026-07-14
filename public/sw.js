@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pwa-nes-mobile-v42';
+const CACHE_NAME = 'pwa-nes-mobile-v43';
 const BASE_PATH = new URL('./', self.location.href).pathname;
 const ASSETS = [BASE_PATH, `${BASE_PATH}manifest.webmanifest`, `${BASE_PATH}icon-192.png`, `${BASE_PATH}icon-512.png`];
 

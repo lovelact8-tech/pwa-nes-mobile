@@ -34,6 +34,7 @@ const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
 const canvas = document.querySelector('#screen');
 const ctx = canvas.getContext('2d');
+const remoteStreamVideo = document.querySelector('#remoteStream');
 const imageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 const frameBuffer32 = new Uint32Array(imageData.data.buffer);
 
@@ -109,6 +110,7 @@ let localPlayer = 1;
 let remotePlayer = 2;
 let networkRole = 'offline';
 let networkTransport = 'peer';
+let networkPlayMode = 'rollback';
 let roomId = '';
 let peer = null;
 let peerConnection = null;
@@ -163,6 +165,16 @@ let networkPingSentAt = 0;
 let lastNetworkPingAt = 0;
 let lastGuestCatchUpLogAt = 0;
 let lastLateInputResyncAt = 0;
+let streamPeerConnection = null;
+let streamInputChannel = null;
+let streamLocalMedia = null;
+let streamRemoteMedia = null;
+let streamPendingIce = [];
+let streamInputSequence = 0;
+let streamLastRemoteInputSequence = 0;
+let streamInputHeartbeat = 0;
+let streamConnectTimeout = 0;
+let streamGuestWasRunning = false;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -186,6 +198,7 @@ let audioWrite = 0;
 let audioCount = 0;
 let audioL = null;
 let audioR = null;
+let streamAudioDestination = null;
 
 const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v2';
 const LEGACY_CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
@@ -461,12 +474,17 @@ function getNetworkDiagnosticLog() {
     `online=${navigator.onLine}`,
     `role=${networkRole}`,
     `transport=${networkTransport}`,
+    `playMode=${networkPlayMode}`,
     `hybrid=${hybridRoom}`,
     `room=${roomHint}`,
     `peerReady=${peerReady}`,
     `peerConnected=${peerConnected}`,
     `relayReady=${relayReady}`,
     `relaySocket=${relaySocket?.readyState ?? 'none'}`,
+    `streamPeer=${streamPeerConnection?.connectionState || 'none'}`,
+    `streamIce=${streamPeerConnection?.iceConnectionState || 'none'}`,
+    `streamInput=${streamInputChannel?.readyState || 'none'}`,
+    `streamVideo=${remoteStreamVideo?.readyState ?? 'none'}`,
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
     `rttMs=${Math.round(networkRttMs)}`,
@@ -492,6 +510,264 @@ function setNetworkText(text) {
   }
 }
 
+function isAuthoritativeStreamMode() {
+  return networkPlayMode === 'stream' && networkTransport === 'relay';
+}
+
+function getStreamRtcConfig() {
+  return {
+    iceServers: [
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: 'stun:stun.l.google.com:19302' },
+    ],
+    bundlePolicy: 'max-bundle',
+    iceCandidatePoolSize: 4,
+  };
+}
+
+function sendStreamInput(buttons = getLocalMergedButtons(), { quiet = false } = {}) {
+  if (!isAuthoritativeStreamMode() || networkRole !== 'guest') return;
+  const message = {
+    type: 'stream-input',
+    player: 2,
+    buttons: Array.from(buttons || []),
+    sequence: ++streamInputSequence,
+    heartbeat: quiet,
+  };
+  const payload = JSON.stringify(message);
+  if (streamInputChannel?.readyState === 'open') {
+    streamInputChannel.send(payload);
+    if (!quiet) logNetworkEvent('stream-input-send', { via: 'datachannel', sequence: message.sequence, buttons: message.buttons });
+  } else {
+    sendPeerMessage(message);
+    if (!quiet) logNetworkEvent('stream-input-send', { via: 'relay', sequence: message.sequence, buttons: message.buttons });
+  }
+}
+
+function applyStreamRemoteInput(message) {
+  if (!isAuthoritativeStreamMode() || networkRole !== 'host') return;
+  const sequence = Math.max(0, Math.floor(Number(message.sequence) || 0));
+  if (sequence && sequence <= streamLastRemoteInputSequence) return;
+  if (sequence) streamLastRemoteInputSequence = sequence;
+  setPlayerButtons(2, new Set(message.buttons || []), { broadcast: false });
+  if (!message.heartbeat) logNetworkEvent('stream-input-received', { sequence, buttons: message.buttons || [] });
+}
+
+function configureStreamInputChannel(channel) {
+  streamInputChannel = channel;
+  channel.onopen = () => {
+    logNetworkEvent('stream-input-open', { role: networkRole });
+    if (networkRole === 'guest') {
+      sendStreamInput();
+      clearInterval(streamInputHeartbeat);
+      streamInputHeartbeat = window.setInterval(() => sendStreamInput(getLocalMergedButtons(), { quiet: true }), 100);
+    }
+  };
+  channel.onmessage = (event) => {
+    try {
+      const message = JSON.parse(String(event.data || ''));
+      if (message.type === 'stream-input') applyStreamRemoteInput(message);
+    } catch (error) {
+      logNetworkEvent('stream-input-error', { message: error?.message || String(error) });
+    }
+  };
+  channel.onclose = () => {
+    logNetworkEvent('stream-input-close', { role: networkRole });
+    clearInterval(streamInputHeartbeat);
+    streamInputHeartbeat = 0;
+    if (networkRole === 'host') setPlayerButtons(2, new Set(), { broadcast: false });
+  };
+}
+
+function showRemoteStream(stream) {
+  streamRemoteMedia = stream;
+  streamGuestWasRunning = streamGuestWasRunning || running;
+  if (running) stopLoop();
+  showGame();
+  remoteStreamVideo.srcObject = stream;
+  remoteStreamVideo.muted = false;
+  remoteStreamVideo.classList.remove('hidden');
+  updateSoundButton();
+  const playPromise = remoteStreamVideo.play();
+  playPromise?.then(() => {
+    setNetworkText('已进入 1P 权威画面，2P 手柄可操作');
+    sendPeerMessage({ type: 'stream-ready' });
+  }).catch(() => {
+    remoteStreamVideo.muted = true;
+    updateSoundButton();
+    remoteStreamVideo.play().catch(() => {});
+    setNetworkText('画面已连接，点一下手柄开启声音');
+    sendPeerMessage({ type: 'stream-ready', muted: true });
+  });
+}
+
+function unlockRemoteStreamAudio(event) {
+  if (networkRole !== 'guest' || remoteStreamVideo.classList.contains('hidden')) return;
+  if (event?.target?.closest?.('#soundBtn')) return;
+  remoteStreamVideo.muted = false;
+  updateSoundButton();
+  remoteStreamVideo.play().then(() => {
+    setNetworkText('已进入 1P 权威画面，2P 手柄可操作');
+  }).catch(() => {});
+}
+
+function createStreamPeerConnection() {
+  const connection = new RTCPeerConnection(getStreamRtcConfig());
+  streamPeerConnection = connection;
+  streamPendingIce = [];
+  connection.onicecandidate = (event) => {
+    if (!event.candidate) return;
+    sendPeerMessage({ type: 'stream-ice', candidate: event.candidate.toJSON?.() || event.candidate });
+  };
+  connection.oniceconnectionstatechange = () => {
+    logNetworkEvent('stream-ice-state', { state: connection.iceConnectionState });
+  };
+  connection.onconnectionstatechange = () => {
+    logNetworkEvent('stream-peer-state', { state: connection.connectionState });
+    if (connection.connectionState === 'connected') {
+      clearTimeout(streamConnectTimeout);
+      streamConnectTimeout = 0;
+    } else if (['failed', 'disconnected'].includes(connection.connectionState)) {
+      setNetworkText('权威串流连接中断，请重新加入房间');
+    }
+  };
+  if (networkRole === 'guest') {
+    connection.ondatachannel = (event) => configureStreamInputChannel(event.channel);
+    connection.ontrack = (event) => {
+      try {
+        if ('playoutDelayHint' in event.receiver) event.receiver.playoutDelayHint = 0;
+        if ('jitterBufferTarget' in event.receiver) event.receiver.jitterBufferTarget = 0;
+      } catch (error) {
+        // These low-latency receiver hints are optional and browser-specific.
+      }
+      const stream = event.streams?.[0] || streamRemoteMedia || new MediaStream();
+      if (!event.streams?.[0]) stream.addTrack(event.track);
+      showRemoteStream(stream);
+      logNetworkEvent('stream-track-received', { kind: event.track.kind, tracks: stream.getTracks().length });
+    };
+  }
+  return connection;
+}
+
+async function flushStreamIce() {
+  if (!streamPeerConnection?.remoteDescription) return;
+  const candidates = streamPendingIce.splice(0);
+  for (const candidate of candidates) {
+    try {
+      await streamPeerConnection.addIceCandidate(candidate);
+    } catch (error) {
+      logNetworkEvent('stream-ice-add-error', { message: error?.message || String(error) });
+    }
+  }
+}
+
+async function startHostAuthoritativeStream() {
+  if (!isAuthoritativeStreamMode() || networkRole !== 'host' || !peerConnected) return;
+  if (!window.RTCPeerConnection || typeof canvas.captureStream !== 'function') {
+    setNetworkText('当前 1P 浏览器不支持权威画面串流，请使用新版 Safari/Chrome');
+    return;
+  }
+  teardownStreamSession({ restoreLocalGame: false });
+  initAudio();
+  const connection = createStreamPeerConnection();
+  // Each packet is a complete controller state. Unordered/unreliable delivery
+  // avoids head-of-line stalls, while the 100 ms state heartbeat repairs a
+  // dropped release without adding input latency.
+  configureStreamInputChannel(connection.createDataChannel('nes-input', { ordered: false, maxRetransmits: 0 }));
+  streamLocalMedia = canvas.captureStream(60);
+  const videoTrack = streamLocalMedia.getVideoTracks()[0];
+  if (videoTrack) {
+    videoTrack.contentHint = 'motion';
+    const sender = connection.addTrack(videoTrack, streamLocalMedia);
+    sender.setParameters({
+      ...sender.getParameters(),
+      degradationPreference: 'maintain-framerate',
+      encodings: [{ maxBitrate: 1_500_000, maxFramerate: 60, priority: 'high', networkPriority: 'high' }],
+    }).catch(() => {});
+  }
+  for (const track of streamAudioDestination?.stream?.getAudioTracks?.() || []) {
+    streamLocalMedia.addTrack(track);
+    connection.addTrack(track, streamLocalMedia);
+  }
+  const offer = await connection.createOffer();
+  await connection.setLocalDescription(offer);
+  sendPeerMessage({ type: 'stream-offer', description: connection.localDescription });
+  setNetworkText('2P 已连接，正在建立 1P 权威画面...');
+  logNetworkEvent('stream-offer-send', { tracks: streamLocalMedia.getTracks().map((track) => track.kind) });
+  clearTimeout(streamConnectTimeout);
+  streamConnectTimeout = window.setTimeout(() => {
+    if (streamPeerConnection?.connectionState !== 'connected') {
+      setNetworkText('权威串流未能直连；需要为路由器补充私人 TURN');
+      logNetworkEvent('stream-connect-timeout', { ice: streamPeerConnection?.iceConnectionState || 'none' });
+    }
+  }, 10000);
+}
+
+async function acceptHostStreamOffer(message) {
+  if (!isAuthoritativeStreamMode() || networkRole !== 'guest') return;
+  if (!window.RTCPeerConnection) {
+    setNetworkText('当前 2P 浏览器不支持权威画面串流');
+    return;
+  }
+  const earlyIce = streamPendingIce.slice();
+  teardownStreamSession({ restoreLocalGame: false });
+  const connection = createStreamPeerConnection();
+  streamPendingIce = earlyIce;
+  await connection.setRemoteDescription(message.description);
+  await flushStreamIce();
+  const answer = await connection.createAnswer();
+  await connection.setLocalDescription(answer);
+  sendPeerMessage({ type: 'stream-answer', description: connection.localDescription });
+  setNetworkText('已连接房间，正在接收 1P 权威画面...');
+  logNetworkEvent('stream-answer-send');
+}
+
+async function acceptGuestStreamAnswer(message) {
+  if (!isAuthoritativeStreamMode() || networkRole !== 'host' || !streamPeerConnection) return;
+  await streamPeerConnection.setRemoteDescription(message.description);
+  await flushStreamIce();
+  logNetworkEvent('stream-answer-received');
+}
+
+function addStreamIceCandidate(message) {
+  if (!isAuthoritativeStreamMode() || !message.candidate) return;
+  const candidate = new RTCIceCandidate(message.candidate);
+  if (!streamPeerConnection?.remoteDescription) streamPendingIce.push(candidate);
+  else streamPeerConnection.addIceCandidate(candidate).catch((error) => {
+    logNetworkEvent('stream-ice-add-error', { message: error?.message || String(error) });
+  });
+}
+
+function teardownStreamSession({ restoreLocalGame = true } = {}) {
+  clearTimeout(streamConnectTimeout);
+  streamConnectTimeout = 0;
+  clearInterval(streamInputHeartbeat);
+  streamInputHeartbeat = 0;
+  if (streamInputChannel) {
+    streamInputChannel.onclose = null;
+    streamInputChannel.close?.();
+  }
+  streamInputChannel = null;
+  streamPeerConnection?.close?.();
+  streamPeerConnection = null;
+  streamLocalMedia?.getVideoTracks?.().forEach((track) => track.stop());
+  streamLocalMedia = null;
+  streamRemoteMedia = null;
+  streamPendingIce = [];
+  streamInputSequence = 0;
+  streamLastRemoteInputSequence = 0;
+  if (remoteStreamVideo) {
+    remoteStreamVideo.pause?.();
+    remoteStreamVideo.srcObject = null;
+    remoteStreamVideo.classList.add('hidden');
+  }
+  if (restoreLocalGame && streamGuestWasRunning && nes && !running) {
+    running = true;
+    startLoop();
+  }
+  streamGuestWasRunning = false;
+}
+
 function getInviteUrl() {
   if (!roomId) return '';
   const url = new URL(window.location.href);
@@ -502,10 +778,12 @@ function getInviteUrl() {
     if (relayGuestTicket) url.searchParams.set('ticket', relayGuestTicket);
   } else if (networkTransport === 'relay') {
     url.searchParams.set('transport', 'relay');
+    url.searchParams.set('netmode', networkPlayMode);
     if (relayGuestTicket) url.searchParams.set('ticket', relayGuestTicket);
   } else {
     url.searchParams.delete('transport');
     url.searchParams.delete('ticket');
+    url.searchParams.delete('netmode');
   }
   return url.toString();
 }
@@ -707,6 +985,16 @@ function flushPeerQueue() {
 function sendPeerButtons(player, buttons) {
   if (networkRole === 'offline') return;
   const nextButtons = Array.from(buttons || []);
+  if (isAuthoritativeStreamMode()) {
+    if (networkRole === 'host') {
+      // 1P is the only emulator in stream mode, so local input is applied
+      // immediately and never waits for a network frame.
+      setPlayerButtons(player, new Set(nextButtons), { broadcast: false });
+    } else {
+      sendStreamInput(new Set(nextButtons));
+    }
+    return;
+  }
   const id = `${networkRole === 'host' ? 'h' : 'g'}-${++localInputSequence}`;
   if (networkRole === 'host') {
     const delayFrames = getNetworkInputDelayFrames();
@@ -1239,6 +1527,8 @@ function updateNetworkButtons() {
 function teardownPeerConnection(finalStatus = '') {
   peerConnected = false;
   peerRomSent = false;
+  if (networkRole === 'host') setPlayerButtons(2, new Set(), { broadcast: false });
+  teardownStreamSession();
   peerConnection?.close?.();
   peerConnection = null;
   peerPendingMessages = [];
@@ -1279,6 +1569,7 @@ function teardownPeer() {
   relayPendingState = null;
   relayGuestTicket = '';
   relayDataQueue = Promise.resolve();
+  networkPlayMode = 'rollback';
 }
 
 function closeRelaySocketSilently() {
@@ -1305,18 +1596,54 @@ function cancelPendingDirectConnection() {
 function markNetworkConnected() {
   if (peerConnected) return;
   peerConnected = true;
-  resetRollbackState({ capture: Boolean(nes) });
+  resetRollbackState({ capture: !isAuthoritativeStreamMode() && Boolean(nes) });
   flushPeerQueue();
   const route = networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连';
-  setNetworkText(networkRole === 'host' ? `2P 已连接（${route}）` : `已通过${route}加入，等待游戏同步`);
+  setNetworkText(isAuthoritativeStreamMode()
+    ? networkRole === 'host' ? '2P 已连接，正在建立 1P 权威画面...' : '已加入房间，等待 1P 权威画面'
+    : networkRole === 'host' ? `2P 已连接（${route}）` : `已通过${route}加入，等待游戏同步`);
   updateNetworkButtons();
-  if (networkRole === 'host' && lastRomData && !peerRomSent) {
+  if (isAuthoritativeStreamMode()) {
+    if (networkRole === 'host') startHostAuthoritativeStream().catch((error) => {
+      console.warn(error);
+      logNetworkEvent('stream-host-start-error', { name: error?.name || 'Error', message: error?.message || String(error) });
+      setNetworkText('1P 权威画面启动失败，请重新创建房间');
+    });
+  } else if (networkRole === 'host' && lastRomData && !peerRomSent) {
     sendCurrentRomToPeer();
   }
 }
 
 function handleNetworkMessage(message) {
   if (!message || typeof message !== 'object') return;
+  if (message.type === 'stream-offer') {
+    acceptHostStreamOffer(message).catch((error) => {
+      console.warn(error);
+      logNetworkEvent('stream-offer-error', { name: error?.name || 'Error', message: error?.message || String(error) });
+      setNetworkText('接收 1P 权威画面失败，请重新加入');
+    });
+    return;
+  }
+  if (message.type === 'stream-answer') {
+    acceptGuestStreamAnswer(message).catch((error) => {
+      console.warn(error);
+      logNetworkEvent('stream-answer-error', { name: error?.name || 'Error', message: error?.message || String(error) });
+    });
+    return;
+  }
+  if (message.type === 'stream-ice') {
+    addStreamIceCandidate(message);
+    return;
+  }
+  if (message.type === 'stream-input') {
+    applyStreamRemoteInput(message);
+    return;
+  }
+  if (message.type === 'stream-ready' && networkRole === 'host' && isAuthoritativeStreamMode()) {
+    setNetworkText(message.muted ? '2P 画面已同步，等待 2P 点手柄开启声音' : '2P 已同步到 1P 权威画面');
+    logNetworkEvent('stream-ready', { muted: Boolean(message.muted) });
+    return;
+  }
   if (message.type === 'ping' && networkRole === 'host') {
     sendPeerMessage({ type: 'pong', id: message.id, frame: gameFrame });
     return;
@@ -1834,6 +2161,7 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   }
   teardownPeer();
   networkTransport = 'relay';
+  networkPlayMode = new URLSearchParams(window.location.search).get('netmode') === 'rollback' ? 'rollback' : 'stream';
   networkRole = role;
   roomId = String(nextRoomId || '').trim() || generateRoomId();
   relayGuestTicket = guestTicket;
@@ -2139,6 +2467,10 @@ function initAudio() {
       }
     };
     scriptNode.connect(audioCtx.destination);
+    if (typeof audioCtx.createMediaStreamDestination === 'function') {
+      streamAudioDestination = audioCtx.createMediaStreamDestination();
+      scriptNode.connect(streamAudioDestination);
+    }
     audioCtx.resume?.();
     audioEnabled = true;
     updateSoundButton();
@@ -2155,6 +2487,10 @@ function clearAudioBuffer() {
 }
 
 function updateSoundButton() {
+  if (isAuthoritativeStreamMode() && networkRole === 'guest' && !remoteStreamVideo.classList.contains('hidden')) {
+    soundBtn.textContent = remoteStreamVideo.muted ? '开声' : '有声';
+    return;
+  }
   if (!audioCtx) {
     soundBtn.textContent = '开声';
   } else {
@@ -2315,7 +2651,7 @@ function startRom(romData, name = 'NES 游戏') {
     paused = false;
     pauseBtn.textContent = '暂停';
     setStatus(`正在玩：${name}`);
-    if (networkRole === 'host' && peerConnected && lastRomData) {
+    if (networkRole === 'host' && peerConnected && lastRomData && !isAuthoritativeStreamMode()) {
       sendCurrentRomToPeer();
     }
     startLoop();
@@ -2342,7 +2678,7 @@ function stopLoop() {
 function loop(timestamp) {
   if (!running || !nes) return;
 
-  flushPendingNetworkRollback();
+  if (!isAuthoritativeStreamMode()) flushPendingNetworkRollback();
 
   if (networkSyncPaused) {
     lastTick = timestamp;
@@ -2403,8 +2739,10 @@ function loop(timestamp) {
   }
 
   while (elapsed >= FRAME_MS && frames < 3) {
-    captureRollbackSnapshot();
-    applyScheduledNetworkInputs();
+    if (!isAuthoritativeStreamMode()) {
+      captureRollbackSnapshot();
+      applyScheduledNetworkInputs();
+    }
     nes.frame();
     gameFrame++;
     elapsed -= FRAME_MS;
@@ -2413,7 +2751,7 @@ function loop(timestamp) {
 
   frameRemainder = elapsed;
   lastTick = timestamp;
-  if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
+  if (!isAuthoritativeStreamMode() && networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
     sendPeerMessage({ type: 'clock', frame: gameFrame });
   }
@@ -2422,7 +2760,7 @@ function loop(timestamp) {
     networkPingId = '';
   }
   const pingInterval = networkRttMs ? 2000 : 750;
-  if (networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= pingInterval) {
+  if (!isAuthoritativeStreamMode() && networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= pingInterval) {
     lastNetworkPingAt = timestamp;
     networkPingSentAt = performance.now();
     networkPingId = `${Math.round(networkPingSentAt).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -2497,6 +2835,12 @@ pauseBtn.addEventListener('click', () => {
 });
 
 soundBtn.addEventListener('click', () => {
+  if (isAuthoritativeStreamMode() && networkRole === 'guest' && !remoteStreamVideo.classList.contains('hidden')) {
+    remoteStreamVideo.muted = !remoteStreamVideo.muted;
+    if (!remoteStreamVideo.muted) remoteStreamVideo.play().catch(() => {});
+    updateSoundButton();
+    return;
+  }
   if (!audioCtx) {
     initAudio();
   } else {
@@ -2621,6 +2965,7 @@ document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('gesturestart', (event) => {
   if (game.contains(event.target)) event.preventDefault();
 }, { passive: false });
+game.addEventListener('pointerdown', unlockRemoteStreamAudio, { passive: true });
 document.addEventListener('dblclick', (event) => {
   if (game.contains(event.target)) event.preventDefault();
 }, { passive: false });
