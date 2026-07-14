@@ -9,6 +9,9 @@ const maxConnectionsPerIp = Math.max(2, Number(process.env.MAX_CONNECTIONS_PER_I
 const trustProxy = process.env.TRUST_PROXY === '1';
 const relayAccessKey = process.env.RELAY_ACCESS_KEY || '';
 const tokenSecret = process.env.RELAY_TOKEN_SECRET || '';
+const turnSharedSecret = process.env.TURN_SHARED_SECRET || '';
+const turnUrls = (process.env.TURN_URLS || '').split(',').map((value) => value.trim()).filter(Boolean);
+const turnCredentialTtlSeconds = Math.max(600, Math.min(86_400, Number(process.env.TURN_CREDENTIAL_TTL_SECONDS || 7200)));
 const ticketTtlSeconds = Math.max(300, Math.min(86_400, Number(process.env.TICKET_TTL_SECONDS || 7200)));
 const allowedOrigins = new Set(
   (process.env.ALLOWED_ORIGINS || 'https://lovelact8-tech.github.io,http://localhost:5173,http://127.0.0.1:5173')
@@ -62,6 +65,14 @@ function createTicket(roomId, role) {
   })).toString('base64url');
   const signature = crypto.createHmac('sha256', tokenSecret).update(payload).digest('base64url');
   return `${payload}.${signature}`;
+}
+
+function createTurnConfig(roomId, role) {
+  if (turnSharedSecret.length < 32 || !turnUrls.length) return null;
+  const expiresAt = Math.floor(Date.now() / 1000) + turnCredentialTtlSeconds;
+  const username = `${expiresAt}:${role}-${roomId.slice(0, 8)}-${crypto.randomBytes(5).toString('hex')}`;
+  const credential = crypto.createHmac('sha1', turnSharedSecret).update(username).digest('base64');
+  return { urls: turnUrls, username, credential, expiresAt };
 }
 
 function verifyTicket(ticket, roomId, role) {
@@ -223,7 +234,8 @@ relay.on('connection', (socket) => {
   socket.windowBytes = 0;
 
   const other = role === 'host' ? room.guest : room.host;
-  sendControl(socket, 'ready', { peerConnected: Boolean(other) });
+  const turn = createTurnConfig(roomId, role);
+  sendControl(socket, 'ready', { peerConnected: Boolean(other), ...(turn ? { turn } : {}) });
   if (other) {
     sendControl(socket, 'peer-connected');
     sendControl(other, 'peer-connected');

@@ -122,6 +122,7 @@ let relayPendingRomName = '';
 let relayPendingRomEncoding = '';
 let relayPendingState = null;
 let relayGuestTicket = '';
+let relayTurnConfig = null;
 let relayDataQueue = Promise.resolve();
 let hybridRoom = false;
 let hybridFallbackTimer = 0;
@@ -175,6 +176,8 @@ let streamLastRemoteInputSequence = 0;
 let streamInputHeartbeat = 0;
 let streamConnectTimeout = 0;
 let streamGuestWasRunning = false;
+let streamFirstFrameReady = false;
+let streamReadySent = false;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -515,14 +518,38 @@ function isAuthoritativeStreamMode() {
 }
 
 function getStreamRtcConfig() {
+  const privateTurn = relayTurnConfig?.urls?.length && relayTurnConfig.username && relayTurnConfig.credential
+    ? [{ urls: relayTurnConfig.urls, username: relayTurnConfig.username, credential: relayTurnConfig.credential }]
+    : [];
   return {
     iceServers: [
+      ...privateTurn,
       { urls: 'stun:stun.cloudflare.com:3478' },
       { urls: 'stun:stun.l.google.com:19302' },
     ],
     bundlePolicy: 'max-bundle',
     iceCandidatePoolSize: 4,
   };
+}
+
+function maybeMarkRemoteStreamReady() {
+  if (streamReadySent || !streamFirstFrameReady || streamPeerConnection?.connectionState !== 'connected') return;
+  streamReadySent = true;
+  setNetworkText(remoteStreamVideo.muted ? '权威画面已同步，点一下手柄开启声音' : '已进入 1P 权威画面，2P 手柄可操作');
+  sendPeerMessage({ type: 'stream-ready', muted: remoteStreamVideo.muted });
+  logNetworkEvent('stream-first-frame', { muted: remoteStreamVideo.muted, width: remoteStreamVideo.videoWidth, height: remoteStreamVideo.videoHeight });
+}
+
+function armRemoteFirstFrameCheck() {
+  const markReady = () => {
+    streamFirstFrameReady = true;
+    maybeMarkRemoteStreamReady();
+  };
+  if (typeof remoteStreamVideo.requestVideoFrameCallback === 'function') {
+    remoteStreamVideo.requestVideoFrameCallback(markReady);
+  } else {
+    remoteStreamVideo.addEventListener('loadeddata', markReady, { once: true });
+  }
 }
 
 function sendStreamInput(buttons = getLocalMergedButtons(), { quiet = false } = {}) {
@@ -588,16 +615,13 @@ function showRemoteStream(stream) {
   remoteStreamVideo.muted = false;
   remoteStreamVideo.classList.remove('hidden');
   updateSoundButton();
+  armRemoteFirstFrameCheck();
   const playPromise = remoteStreamVideo.play();
-  playPromise?.then(() => {
-    setNetworkText('已进入 1P 权威画面，2P 手柄可操作');
-    sendPeerMessage({ type: 'stream-ready' });
-  }).catch(() => {
+  playPromise?.catch(() => {
     remoteStreamVideo.muted = true;
     updateSoundButton();
     remoteStreamVideo.play().catch(() => {});
-    setNetworkText('画面已连接，点一下手柄开启声音');
-    sendPeerMessage({ type: 'stream-ready', muted: true });
+    setNetworkText('正在等待 1P 权威画面，连接后点手柄开启声音');
   });
 }
 
@@ -627,6 +651,7 @@ function createStreamPeerConnection() {
     if (connection.connectionState === 'connected') {
       clearTimeout(streamConnectTimeout);
       streamConnectTimeout = 0;
+      maybeMarkRemoteStreamReady();
     } else if (['failed', 'disconnected'].includes(connection.connectionState)) {
       setNetworkText('权威串流连接中断，请重新加入房间');
     }
@@ -756,6 +781,8 @@ function teardownStreamSession({ restoreLocalGame = true } = {}) {
   streamPendingIce = [];
   streamInputSequence = 0;
   streamLastRemoteInputSequence = 0;
+  streamFirstFrameReady = false;
+  streamReadySent = false;
   if (remoteStreamVideo) {
     remoteStreamVideo.pause?.();
     remoteStreamVideo.srcObject = null;
@@ -1567,6 +1594,7 @@ function teardownPeer() {
   relayPendingRomName = '';
   relayPendingRomEncoding = '';
   relayPendingState = null;
+  relayTurnConfig = null;
   relayGuestTicket = '';
   relayDataQueue = Promise.resolve();
   networkPlayMode = 'rollback';
@@ -2057,6 +2085,14 @@ function handleRelayControl(message) {
   logNetworkEvent('relay-control', { type: message.__relay, peerConnected: Boolean(message.peerConnected) });
   if (message.__relay === 'ready') {
     relayReady = true;
+    relayTurnConfig = message.turn?.urls && message.turn?.username && message.turn?.credential
+      ? {
+          urls: Array.isArray(message.turn.urls) ? message.turn.urls : [message.turn.urls],
+          username: String(message.turn.username),
+          credential: String(message.turn.credential),
+        }
+      : null;
+    logNetworkEvent('relay-turn-config', { configured: Boolean(relayTurnConfig), urls: relayTurnConfig?.urls?.length || 0 });
     refreshInviteLink();
     updateNetworkButtons();
     if (message.peerConnected) {
