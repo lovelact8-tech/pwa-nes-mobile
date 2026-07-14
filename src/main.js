@@ -23,6 +23,7 @@ const RELAY_MIN_GUEST_BUFFER_FRAMES = 5;
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
+const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -143,6 +144,7 @@ let networkPingId = '';
 let networkPingSentAt = 0;
 let lastNetworkPingAt = 0;
 let lastGuestCatchUpLogAt = 0;
+let lastLateInputResyncAt = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -733,8 +735,11 @@ function getRelayGuestBufferFrames(rttMs = networkRttMs) {
 
 function scheduleNetworkInput(player, buttons, frame) {
   const requestedFrame = Number(frame) || gameFrame;
-  let targetFrame = Math.max(gameFrame + 1, requestedFrame);
-  const late = requestedFrame <= gameFrame;
+  // Inputs are applied immediately before emulating `gameFrame`. Reaching the
+  // exact requested frame is therefore still on time; treating equality as
+  // late shifted one peer by a frame and permanently forked game outcomes.
+  let targetFrame = Math.max(gameFrame, requestedFrame);
+  const late = requestedFrame < gameFrame;
   if (late) {
     // Preserve late key-down/key-up transitions instead of mapping every
     // packet to the same frame (where the final key-up used to erase taps).
@@ -749,6 +754,7 @@ function scheduleNetworkInput(player, buttons, frame) {
   }
   scheduledNetworkInputs.push({ player, buttons: Array.from(buttons || []), frame: targetFrame });
   scheduledNetworkInputs.sort((a, b) => a.frame - b.frame);
+  return { late, requestedFrame, targetFrame };
 }
 
 function applyScheduledNetworkInputs() {
@@ -798,16 +804,25 @@ function startHostStateSync(syncId) {
   }, NETWORK_SYNC_TIMEOUT_MS);
 }
 
-function requestInitialStateSync() {
+function requestInitialStateSync(reason = 'initial') {
   if (networkRole !== 'guest' || stateRequestInFlight) return;
   const syncId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   networkSyncId = syncId;
   networkSyncPaused = true;
   stateRequestInFlight = true;
   lastStateRequestAt = performance.now();
-  setNetworkText('游戏已加载，正在同步 1P 进度...');
-  logNetworkEvent('state-request-sent', { syncId });
+  setNetworkText(reason === 'late-input' ? '检测到网络抖动，正在恢复画面同步...' : '游戏已加载，正在同步 1P 进度...');
+  logNetworkEvent('state-request-sent', { syncId, reason });
   sendPeerMessage({ type: 'state-request', syncId });
+}
+
+function recoverFromLateNetworkInput(detail) {
+  if (networkRole !== 'guest' || stateRequestInFlight || networkSyncId) return;
+  const now = performance.now();
+  if (lastLateInputResyncAt && now - lastLateInputResyncAt < LATE_INPUT_RESYNC_COOLDOWN_MS) return;
+  lastLateInputResyncAt = now;
+  logNetworkEvent('late-input-resync', detail);
+  window.setTimeout(() => requestInitialStateSync('late-input'), 120);
 }
 
 function fastForwardNetworkToFrame(targetFrame) {
@@ -914,6 +929,7 @@ function teardownPeerConnection(finalStatus = '') {
   networkPingSentAt = 0;
   lastNetworkPingAt = 0;
   lastGuestCatchUpLogAt = 0;
+  lastLateInputResyncAt = 0;
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
@@ -1054,8 +1070,21 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
-    logNetworkEvent('input-received', { player: message.player, buttons: message.buttons || [], frame: message.frame, localFrame: gameFrame });
-    scheduleNetworkInput(message.player, message.buttons, message.frame);
+    const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame);
+    logNetworkEvent('input-received', {
+      player: message.player,
+      buttons: message.buttons || [],
+      frame: message.frame,
+      localFrame: gameFrame,
+      targetFrame: scheduled.targetFrame,
+      late: scheduled.late,
+    });
+    if (scheduled.late) recoverFromLateNetworkInput({
+      player: message.player,
+      requestedFrame: scheduled.requestedFrame,
+      localFrame: gameFrame,
+      targetFrame: scheduled.targetFrame,
+    });
     return;
   }
   if (message.type === 'clock' && networkRole === 'guest') {
