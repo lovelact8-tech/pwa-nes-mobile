@@ -9,18 +9,18 @@ const FRAMEBUFFER_SIZE = SCREEN_WIDTH * SCREEN_HEIGHT;
 const FRAME_MS = 1000 / 60;
 const MAX_FRAME_DELTA_MS = FRAME_MS * 3;
 const MAX_PEER_QUEUE_SIZE = 32;
-// Apply authoritative input on the next emulation tick. Adding a fixed frame
-// here delays both players without improving an already-buffered relay guest.
-const NET_INPUT_DELAY_FRAMES = 0;
+// One authoritative frame gives the host time to preserve short down/up input
+// transitions before both peers execute them on the same emulation frame.
+const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_MIN_JITTER_BUFFER_MS = 12;
-const RELAY_MAX_JITTER_BUFFER_MS = 80;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 2;
+const RELAY_MIN_JITTER_BUFFER_MS = 50;
+const RELAY_MAX_JITTER_BUFFER_MS = 120;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 4;
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
@@ -848,7 +848,9 @@ function recoverFromLateNetworkInput(detail) {
   if (lastLateInputResyncAt && now - lastLateInputResyncAt < LATE_INPUT_RESYNC_COOLDOWN_MS) return;
   lastLateInputResyncAt = now;
   logNetworkEvent('late-input-resync', detail);
-  window.setTimeout(() => requestInitialStateSync('late-input'), 120);
+  // Continuing even a few frames after a late input can permanently fork a
+  // deterministic NES game. Freeze immediately and recover from the host.
+  requestInitialStateSync('late-input');
 }
 
 function fastForwardNetworkToFrame(targetFrame) {
