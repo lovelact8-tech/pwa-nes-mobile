@@ -14,6 +14,12 @@ const MAX_PEER_QUEUE_SIZE = 32;
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
+// Relay guests intentionally run behind the host by roughly one-way latency.
+// This gives host inputs time to arrive before the guest reaches the matching
+// frame, without making the host wait for a high-latency round trip.
+const RELAY_JITTER_BUFFER_MS = 250;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 12;
+const RELAY_MAX_GUEST_BUFFER_FRAMES = 120;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -682,12 +688,18 @@ function sendPeerButtons(player, buttons) {
 }
 
 function getNetworkInputDelayFrames() {
-  if (networkTransport !== 'relay') return NET_INPUT_DELAY_FRAMES;
-  const rtt = networkRttMs > 0 ? networkRttMs : 1000;
-  // Schedule far enough into the future for the message to reach the other
-  // emulator before that frame. A small jitter allowance prevents a key-down
-  // and key-up from collapsing into the same late frame.
-  return Math.max(8, Math.min(90, Math.ceil((rtt / 2 + 140) / FRAME_MS)));
+  // The guest carries the latency buffer. Delaying host input by half the RTT
+  // made local controls take one or two seconds on overseas relay routes.
+  return NET_INPUT_DELAY_FRAMES;
+}
+
+function getRelayGuestBufferFrames(rttMs = networkRttMs) {
+  if (networkTransport !== 'relay') return 1;
+  const rtt = rttMs > 0 ? rttMs : 1000;
+  return Math.max(
+    RELAY_MIN_GUEST_BUFFER_FRAMES,
+    Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + RELAY_JITTER_BUFFER_MS) / FRAME_MS)),
+  );
 }
 
 function scheduleNetworkInput(player, buttons, frame) {
@@ -988,11 +1000,15 @@ function handleNetworkMessage(message) {
     && message.syncId === networkSyncId && message.probeId === networkSyncProbeId) {
     const probeRtt = Math.max(0, performance.now() - networkSyncProbeSentAt);
     networkRttMs = networkRttMs ? networkRttMs * 0.5 + probeRtt * 0.5 : probeRtt;
-    const bufferFrames = networkTransport === 'relay' ? 4 : 1;
-    const transitFrames = Math.max(0, Math.round((probeRtt / 2) / FRAME_MS) - bufferFrames);
-    const targetFrame = (Number(message.frame) || gameFrame) + transitFrames;
+    const transitFrames = Math.max(0, Math.round((probeRtt / 2) / FRAME_MS));
+    const bufferFrames = getRelayGuestBufferFrames(probeRtt);
+    const targetFrame = Math.max(gameFrame, (Number(message.frame) || gameFrame) + transitFrames - bufferFrames);
     sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
-    finishGuestStateSync(targetFrame, { probeRttMs: Math.round(probeRtt), transitFrames });
+    finishGuestStateSync(targetFrame, {
+      probeRttMs: Math.round(probeRtt),
+      transitFrames,
+      bufferFrames,
+    });
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
@@ -1906,7 +1922,7 @@ function loop(timestamp) {
   if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
     const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
     const estimatedHostFrame = hostClockFrame + (transitEstimate + timestamp - hostClockReceivedAt) / FRAME_MS;
-    const bufferFrames = networkTransport === 'relay' ? 4 : 1;
+    const bufferFrames = getRelayGuestBufferFrames();
     const frameDifference = estimatedHostFrame - bufferFrames - gameFrame;
     // Adjust playback by at most 12% instead of inserting/skipping whole
     // frames whenever a delayed clock packet arrives. This keeps relay play
