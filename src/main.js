@@ -124,6 +124,11 @@ let networkSyncPaused = false;
 let networkSyncId = '';
 let networkSyncTimeout = 0;
 let stateRequestInFlight = false;
+let suppressEmulatorOutput = false;
+let networkRttMs = 0;
+let networkPingId = '';
+let networkPingSentAt = 0;
+let lastNetworkPingAt = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
@@ -671,7 +676,6 @@ function clearNetworkSync() {
 function startHostStateSync(syncId) {
   if (!syncId || networkSyncId) return;
   networkSyncId = syncId;
-  networkSyncPaused = true;
   sendPeerSnapshot(syncId);
   networkSyncTimeout = window.setTimeout(() => {
     if (networkSyncId !== syncId) return;
@@ -691,6 +695,33 @@ function requestInitialStateSync() {
   setNetworkText('游戏已加载，正在同步 1P 进度...');
   logNetworkEvent('state-request-sent', { syncId });
   sendPeerMessage({ type: 'state-request', syncId });
+}
+
+function fastForwardNetworkToFrame(targetFrame) {
+  if (!nes) return;
+  const target = Math.max(gameFrame, Number(targetFrame) || gameFrame);
+  const requestedFrames = target - gameFrame;
+  const maxFastForwardFrames = 1800;
+  const finalTarget = gameFrame + Math.min(requestedFrames, maxFastForwardFrames);
+  const startedAt = performance.now();
+  suppressEmulatorOutput = true;
+  try {
+    while (gameFrame < finalTarget) {
+      applyScheduledNetworkInputs();
+      nes.frame();
+      gameFrame++;
+    }
+  } finally {
+    suppressEmulatorOutput = false;
+    clearAudioBuffer();
+  }
+  logNetworkEvent('sync-fast-forward', {
+    requestedFrames,
+    appliedFrames: finalTarget - (target - requestedFrames),
+    durationMs: Math.round(performance.now() - startedAt),
+    targetFrame: target,
+    finalFrame: gameFrame,
+  });
 }
 
 function applyPeerRom(romData, name = 'NES 游戏') {
@@ -726,6 +757,10 @@ function teardownPeerConnection(finalStatus = '') {
   lastStateRequestAt = 0;
   clearNetworkSync();
   lastNetworkClockAt = 0;
+  networkRttMs = 0;
+  networkPingId = '';
+  networkPingSentAt = 0;
+  lastNetworkPingAt = 0;
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
@@ -788,6 +823,19 @@ function markNetworkConnected() {
 
 function handleNetworkMessage(message) {
   if (!message || typeof message !== 'object') return;
+  if (message.type === 'ping' && networkRole === 'host') {
+    sendPeerMessage({ type: 'pong', id: message.id, frame: gameFrame });
+    return;
+  }
+  if (message.type === 'pong' && networkRole === 'guest' && message.id === networkPingId) {
+    const measuredRtt = Math.max(0, performance.now() - networkPingSentAt);
+    networkRttMs = networkRttMs ? networkRttMs * 0.75 + measuredRtt * 0.25 : measuredRtt;
+    networkPingId = '';
+    hostClockFrame = Number(message.frame) || hostClockFrame;
+    hostClockReceivedAt = performance.now();
+    logNetworkEvent('network-rtt', { ms: Math.round(networkRttMs) });
+    return;
+  }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
     const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
     scheduleNetworkInput(message.player, message.buttons, frame);
@@ -809,6 +857,7 @@ function handleNetworkMessage(message) {
   }
   if (message.type === 'sync-start' && networkRole === 'guest' && message.syncId === networkSyncId) {
     logNetworkEvent('sync-start-received', { syncId: message.syncId, frame: message.frame });
+    fastForwardNetworkToFrame(message.frame);
     clearNetworkSync();
     lastTick = 0;
     frameRemainder = 0;
@@ -1567,12 +1616,14 @@ function createNES() {
   return new NES({
     sampleRate: getSampleRate(),
     onFrame(frameBuffer24) {
+      if (suppressEmulatorOutput) return;
       for (let i = 0; i < FRAMEBUFFER_SIZE; i++) {
         frameBuffer32[i] = 0xff000000 | frameBuffer24[i];
       }
       ctx.putImageData(imageData, 0, 0);
     },
     onAudioSample(left, right) {
+      if (suppressEmulatorOutput) return;
       pushAudioSample(left, right);
     },
   });
@@ -1725,10 +1776,15 @@ function loop(timestamp) {
   let frames = 0;
 
   if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
-    const estimatedHostFrame = hostClockFrame + (timestamp - hostClockReceivedAt) / FRAME_MS;
-    const frameDifference = estimatedHostFrame - gameFrame;
-    if (frameDifference > 0.75) elapsed += Math.min(3, Math.max(1, Math.floor(frameDifference))) * FRAME_MS;
-    if (frameDifference < -0.75) elapsed = Math.max(0, elapsed - FRAME_MS);
+    const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
+    const estimatedHostFrame = hostClockFrame + (transitEstimate + timestamp - hostClockReceivedAt) / FRAME_MS;
+    const bufferFrames = networkTransport === 'relay' ? 4 : 1;
+    const frameDifference = estimatedHostFrame - bufferFrames - gameFrame;
+    // Adjust playback by at most 12% instead of inserting/skipping whole
+    // frames whenever a delayed clock packet arrives. This keeps relay play
+    // smooth while gradually correcting small drift.
+    const correction = Math.max(-0.12, Math.min(0.12, frameDifference * 0.025));
+    elapsed = Math.max(0, elapsed + correction * FRAME_MS);
   }
 
   while (elapsed >= FRAME_MS && frames < 3) {
@@ -1744,6 +1800,16 @@ function loop(timestamp) {
   if (networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
     sendPeerMessage({ type: 'clock', frame: gameFrame });
+  }
+  if (networkPingId && performance.now() - networkPingSentAt > 5000) {
+    logNetworkEvent('network-ping-timeout');
+    networkPingId = '';
+  }
+  if (networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= 2000) {
+    lastNetworkPingAt = timestamp;
+    networkPingSentAt = performance.now();
+    networkPingId = `${Math.round(networkPingSentAt).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    sendPeerMessage({ type: 'ping', id: networkPingId });
   }
   rafId = requestAnimationFrame(loop);
 }
