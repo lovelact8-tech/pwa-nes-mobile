@@ -568,11 +568,28 @@ function base64ToBytes(value) {
 }
 
 function encodeNetworkState(state) {
+  // These PPU arrays are either deterministic lookup tables or temporary
+  // render targets. Rebuilding/reusing them on the guest cuts a typical
+  // compressed snapshot from about 100 KB to about 40 KB without removing
+  // CPU, mapper, controller, VRAM, sprite, or audio state.
+  delete state.ppu?.vramMirrorTable;
+  delete state.ppu?.buffer;
+  delete state.ppu?.bgbuffer;
+  delete state.ppu?.pixrendered;
   return bytesToBase64(gzipSync(strToU8(JSON.stringify(state)), { level: 9 }));
 }
 
 function decodeNetworkState(value) {
-  return JSON.parse(strFromU8(gunzipSync(base64ToBytes(value))));
+  const state = JSON.parse(strFromU8(gunzipSync(base64ToBytes(value))));
+  if (!nes?.ppu || !state?.ppu) return state;
+  const mirroring = Number(state.ppu.currentMirroring);
+  nes.ppu.currentMirroring = -1;
+  nes.ppu.setMirroring(mirroring);
+  state.ppu.vramMirrorTable = nes.ppu.vramMirrorTable;
+  state.ppu.buffer = nes.ppu.buffer;
+  state.ppu.bgbuffer = nes.ppu.bgbuffer;
+  state.ppu.pixrendered = nes.ppu.pixrendered;
+  return state;
 }
 
 function sendTransportMessage(message) {
@@ -640,10 +657,12 @@ function sendPeerButtons(player, buttons) {
   const nextButtons = Array.from(buttons || []);
   if (networkRole === 'host') {
     const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
+    logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame });
     scheduleNetworkInput(player, nextButtons, frame);
     sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame });
     return;
   }
+  logNetworkEvent('input-send', { role: 'guest', player, buttons: nextButtons });
   sendPeerMessage({ type: 'input-request', player, buttons: nextButtons });
 }
 
@@ -880,6 +899,7 @@ function handleNetworkMessage(message) {
   }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
     const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
+    logNetworkEvent('input-request-received', { player: message.player, buttons: message.buttons || [], frame });
     scheduleNetworkInput(message.player, message.buttons, frame);
     sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
     return;
@@ -907,6 +927,7 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
+    logNetworkEvent('input-received', { player: message.player, buttons: message.buttons || [], frame: message.frame, localFrame: gameFrame });
     scheduleNetworkInput(message.player, message.buttons, message.frame);
     return;
   }
