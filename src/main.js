@@ -18,17 +18,17 @@ const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_MIN_JITTER_BUFFER_MS = 50;
-const RELAY_MAX_JITTER_BUFFER_MS = 120;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 4;
+const RELAY_MIN_JITTER_BUFFER_MS = 35;
+const RELAY_MAX_JITTER_BUFFER_MS = 100;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 3;
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
 const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
-const ROLLBACK_SNAPSHOT_INTERVAL_FRAMES = 4;
-const ROLLBACK_WINDOW_FRAMES = 120;
+const ROLLBACK_SNAPSHOT_INTERVAL_FRAMES = 8;
+const ROLLBACK_WINDOW_FRAMES = 128;
 const ROLLBACK_MAX_SNAPSHOTS = Math.ceil(ROLLBACK_WINDOW_FRAMES / ROLLBACK_SNAPSHOT_INTERVAL_FRAMES) + 2;
-const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 300;
+const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 320;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -141,6 +141,8 @@ let rollbackCount = 0;
 let rollbackFrames = 0;
 let pendingStateChecks = new Map();
 let lastStateCheckFrame = -1;
+let pendingRollbackFrame = null;
+let pendingRollbackReason = '';
 let lastQueuedLocalButtons = new Set();
 let lastNetworkClockAt = 0;
 let hostClockFrame = null;
@@ -806,6 +808,8 @@ function resetRollbackState({ capture = false, preserveInputsFromFrame = null } 
   rollbackFrames = 0;
   pendingStateChecks = new Map();
   lastStateCheckFrame = -1;
+  pendingRollbackFrame = null;
+  pendingRollbackReason = '';
   if (capture) captureRollbackSnapshot(true);
   rebuildScheduledNetworkInputs(gameFrame);
 }
@@ -954,11 +958,36 @@ function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
   return true;
 }
 
+function queueNetworkRollback(targetFrame, reason) {
+  pendingRollbackFrame = pendingRollbackFrame === null
+    ? targetFrame
+    : Math.min(pendingRollbackFrame, targetFrame);
+  pendingRollbackReason = pendingRollbackReason || reason;
+}
+
+function flushPendingNetworkRollback() {
+  if (pendingRollbackFrame === null) return true;
+  const targetFrame = pendingRollbackFrame;
+  const reason = pendingRollbackReason || 'batched-input';
+  pendingRollbackFrame = null;
+  pendingRollbackReason = '';
+  const rolledBack = rollbackNetworkToFrame(targetFrame, reason);
+  if (!rolledBack && targetFrame < gameFrame && networkRole === 'guest') {
+    recoverFromLateNetworkInput({ requestedFrame: targetFrame, localFrame: gameFrame, reason: 'rollback-window-miss' });
+  }
+  return rolledBack;
+}
+
 function buttonsMatch(left, right) {
   return left.length === right.length && left.every((button, index) => button === right[index]);
 }
 
-function scheduleNetworkInput(player, buttons, frame, { id = '', order = 0, allowRollback = true } = {}) {
+function scheduleNetworkInput(player, buttons, frame, {
+  id = '',
+  order = 0,
+  allowRollback = true,
+  deferRollback = false,
+} = {}) {
   const requestedFrame = Math.max(0, Math.floor(Number(frame) || 0));
   const normalizedButtons = Array.from(buttons || []).sort();
   const inputId = String(id || `legacy-${++networkEventOrder}`);
@@ -978,11 +1007,18 @@ function scheduleNetworkInput(player, buttons, frame, { id = '', order = 0, allo
   }
   networkInputHistory.sort(compareNetworkInputs);
   rebuildScheduledNetworkInputs(gameFrame);
-  const late = rollbackFrame < gameFrame;
-  const rolledBack = late && allowRollback && rollbackNetworkToFrame(rollbackFrame, corrected ? 'input-correction' : 'late-input');
+  // A matching authoritative echo only confirms an already-predicted 2P
+  // event. Rewinding for that duplicate made both devices stutter on taps.
+  const timelineChanged = !existing || corrected;
+  const late = timelineChanged && rollbackFrame < gameFrame;
+  const rollbackReason = corrected ? 'input-correction' : 'late-input';
+  const rollbackQueued = late && allowRollback && deferRollback;
+  if (rollbackQueued) queueNetworkRollback(rollbackFrame, rollbackReason);
+  const rolledBack = late && allowRollback && !deferRollback && rollbackNetworkToFrame(rollbackFrame, rollbackReason);
   return {
     late,
     rolledBack,
+    rollbackQueued,
     corrected,
     duplicate: Boolean(existing) && !corrected,
     requestedFrame,
@@ -1276,7 +1312,7 @@ function handleNetworkMessage(message) {
       : gameFrame + delayFrames;
     const id = String(message.id || `g-legacy-${++networkEventOrder}`);
     const order = ++authoritativeInputOrder;
-    const scheduled = scheduleNetworkInput(message.player, message.buttons, frame, { id, order });
+    const scheduled = scheduleNetworkInput(message.player, message.buttons, frame, { id, order, deferRollback: true });
     logNetworkEvent('input-request-received', {
       player: message.player,
       buttons: message.buttons || [],
@@ -1284,6 +1320,7 @@ function handleNetworkMessage(message) {
       frame,
       id,
       rolledBack: scheduled.rolledBack,
+      rollbackQueued: scheduled.rollbackQueued,
       correctedFrame: frame !== requestedFrame,
     });
     sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame, id, order });
@@ -1344,6 +1381,7 @@ function handleNetworkMessage(message) {
     const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame, {
       id: message.id,
       order: message.order,
+      deferRollback: true,
     });
     logNetworkEvent('input-received', {
       player: message.player,
@@ -1353,11 +1391,12 @@ function handleNetworkMessage(message) {
       targetFrame: scheduled.targetFrame,
       late: scheduled.late,
       rolledBack: scheduled.rolledBack,
+      rollbackQueued: scheduled.rollbackQueued,
       corrected: scheduled.corrected,
       duplicate: scheduled.duplicate,
       id: scheduled.id,
     });
-    if (scheduled.late && !scheduled.rolledBack) recoverFromLateNetworkInput({
+    if (scheduled.late && !scheduled.rolledBack && !scheduled.rollbackQueued) recoverFromLateNetworkInput({
       player: message.player,
       requestedFrame: scheduled.requestedFrame,
       localFrame: gameFrame,
@@ -2257,6 +2296,8 @@ function stopLoop() {
 
 function loop(timestamp) {
   if (!running || !nes) return;
+
+  flushPendingNetworkRollback();
 
   if (networkSyncPaused) {
     lastTick = timestamp;
