@@ -103,6 +103,7 @@ let relaySocket = null;
 let relayReady = false;
 let relayPendingRomName = '';
 let relayGuestTicket = '';
+let relayDataQueue = Promise.resolve();
 let hybridRoom = false;
 let hybridFallbackTimer = 0;
 let hybridFallbackStarted = false;
@@ -739,6 +740,7 @@ function teardownPeer() {
   relayReady = false;
   relayPendingRomName = '';
   relayGuestTicket = '';
+  relayDataQueue = Promise.resolve();
 }
 
 function closeRelaySocketSilently() {
@@ -749,6 +751,15 @@ function closeRelaySocketSilently() {
   socket.onclose = null;
   socket.onerror = null;
   socket.close();
+}
+
+function cancelPendingDirectConnection() {
+  if (networkTransport !== 'relay' || !peerConnection || peerConnection.open) return;
+  const connection = peerConnection;
+  peerConnection = null;
+  connection.__nesIgnore = true;
+  connection.close();
+  logNetworkEvent('pending-direct-cancelled-after-relay');
 }
 
 function markNetworkConnected() {
@@ -1058,11 +1069,15 @@ function handleRelayControl(message) {
     relayReady = true;
     refreshInviteLink();
     updateNetworkButtons();
-    if (message.peerConnected) markNetworkConnected();
+    if (message.peerConnected) {
+      cancelPendingDirectConnection();
+      markNetworkConnected();
+    }
     else setNetworkText(networkRole === 'host' ? '跨网房间已创建，等待 2P 加入' : '已连接中继，等待 1P');
     return true;
   }
   if (message.__relay === 'peer-connected') {
+    cancelPendingDirectConnection();
     markNetworkConnected();
     return true;
   }
@@ -1073,9 +1088,19 @@ function handleRelayControl(message) {
   return Boolean(message.__relay);
 }
 
-function handleRelayData(data) {
+async function handleRelayData(data) {
+  if (data instanceof Blob) {
+    logNetworkEvent('relay-binary-blob', { bytes: data.size });
+    data = await data.arrayBuffer();
+  } else if (ArrayBuffer.isView(data)) {
+    data = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
   if (data instanceof ArrayBuffer) {
-    if (!relayPendingRomName) return;
+    logNetworkEvent('relay-binary-received', { bytes: data.byteLength, pendingRom: Boolean(relayPendingRomName) });
+    if (!relayPendingRomName) {
+      logNetworkEvent('relay-binary-unexpected', { bytes: data.byteLength });
+      return;
+    }
     const name = relayPendingRomName;
     relayPendingRomName = '';
     handleNetworkMessage({ type: 'rom', name, data: arrayBufferToBinary(data) });
@@ -1087,6 +1112,7 @@ function handleRelayData(data) {
     if (handleRelayControl(message)) return;
     if (message.__nes === 'rom') {
       relayPendingRomName = message.name || 'NES 游戏';
+      logNetworkEvent('relay-rom-header', { name: relayPendingRomName });
       return;
     }
     handleNetworkMessage(message);
@@ -1125,7 +1151,14 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   setNetworkText(role === 'host' ? '正在创建跨网房间...' : '正在加入跨网房间...');
   refreshInviteLink();
   updateNetworkButtons();
-  relaySocket.onmessage = (event) => handleRelayData(event.data);
+  relaySocket.onmessage = (event) => {
+    relayDataQueue = relayDataQueue
+      .then(() => handleRelayData(event.data))
+      .catch((error) => {
+        console.warn(error);
+        logNetworkEvent('relay-data-error', { name: error?.name || 'Error', message: error?.message || String(error) });
+      });
+  };
   relaySocket.onopen = () => logNetworkEvent('relay-websocket-open', { role });
   relaySocket.onerror = () => {
     logNetworkEvent('relay-websocket-error', { role, readyState: relaySocket?.readyState });
