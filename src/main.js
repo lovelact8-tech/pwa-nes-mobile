@@ -867,6 +867,54 @@ function processRollbackStateCheck(snapshot) {
   }
 }
 
+function captureRollbackState() {
+  const ppu = nes.ppu;
+  // Frame buffers and the mirroring lookup table are render-only/derived
+  // data. Serializing them accounts for most of jsnes' snapshot cost and
+  // blocks Safari's main thread during rapid remote input.
+  const omitted = {
+    buffer: ppu.buffer,
+    bgbuffer: ppu.bgbuffer,
+    pixrendered: ppu.pixrendered,
+    vramMirrorTable: ppu.vramMirrorTable,
+  };
+  ppu.buffer = [];
+  ppu.bgbuffer = [];
+  ppu.pixrendered = [];
+  ppu.vramMirrorTable = [];
+  try {
+    return nes.toJSON();
+  } finally {
+    Object.assign(ppu, omitted);
+  }
+}
+
+function restoreRollbackState(state) {
+  const ppuState = state.ppu;
+  if (!ppuState) {
+    nes.fromJSON(state);
+    return;
+  }
+  const omitted = {
+    buffer: ppuState.buffer,
+    bgbuffer: ppuState.bgbuffer,
+    pixrendered: ppuState.pixrendered,
+    vramMirrorTable: ppuState.vramMirrorTable,
+  };
+  ppuState.buffer = nes.ppu.buffer;
+  ppuState.bgbuffer = nes.ppu.bgbuffer;
+  ppuState.pixrendered = nes.ppu.pixrendered;
+  nes.ppu.currentMirroring = -1;
+  nes.ppu.setMirroring(Number(ppuState.currentMirroring));
+  ppuState.vramMirrorTable = nes.ppu.vramMirrorTable;
+  try {
+    nes.fromJSON(state);
+  } finally {
+    // Keep snapshots immutable: live render arrays change every frame.
+    Object.assign(ppuState, omitted);
+  }
+}
+
 function captureRollbackSnapshot(force = false) {
   if (!nes || networkRole === 'offline' || !peerConnected) return null;
   if (!force && gameFrame % ROLLBACK_SNAPSHOT_INTERVAL_FRAMES !== 0) return null;
@@ -874,7 +922,7 @@ function captureRollbackSnapshot(force = false) {
   if (existing) return existing;
   const snapshot = {
     frame: gameFrame,
-    state: nes.toJSON(),
+    state: captureRollbackState(),
     buttons: {
       1: Array.from(buttonStateByPlayer[1]),
       2: Array.from(buttonStateByPlayer[2]),
@@ -923,7 +971,7 @@ function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
   suppressEmulatorOutput = true;
   try {
     rollbackSnapshots = rollbackSnapshots.filter((candidate) => candidate.frame <= snapshot.frame);
-    nes.fromJSON(snapshot.state);
+    restoreRollbackState(snapshot.state);
     gameFrame = snapshot.frame;
     restoreRollbackButtons(snapshot);
     rebuildScheduledNetworkInputs(gameFrame);
@@ -940,10 +988,7 @@ function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
   } finally {
     rollbackInProgress = false;
     suppressEmulatorOutput = previousSuppressOutput;
-    clearAudioBuffer();
     syncButtonVisuals();
-    lastTick = 0;
-    frameRemainder = 0;
   }
   logNetworkEvent('rollback-complete', {
     reason,
