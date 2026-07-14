@@ -136,7 +136,17 @@ let lastNetworkPingAt = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
-const RELAY_SERVER_URL = String(import.meta.env.VITE_RELAY_URL || '').trim();
+const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
+function getRuntimeRelayUrl() {
+  try {
+    const queryValue = new URLSearchParams(window.location.search).get('relay');
+    if (queryValue?.trim()) return queryValue.trim();
+    return localStorage.getItem(RELAY_URL_STORAGE_KEY)?.trim() || '';
+  } catch (error) {
+    return '';
+  }
+}
+const RELAY_SERVER_URL = getRuntimeRelayUrl() || String(import.meta.env.VITE_RELAY_URL || '').trim();
 
 let audioCtx = null;
 let scriptNode = null;
