@@ -14,7 +14,7 @@ const MAX_PEER_QUEUE_SIZE = 32;
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
 const HYBRID_DIRECT_TIMEOUT_MS = 5000;
-const NETWORK_SYNC_TIMEOUT_MS = 8000;
+const NETWORK_SYNC_TIMEOUT_MS = 30000;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -669,6 +669,7 @@ function startHostStateSync(syncId) {
   sendPeerSnapshot(syncId);
   networkSyncTimeout = window.setTimeout(() => {
     if (networkSyncId !== syncId) return;
+    logNetworkEvent('state-sync-timeout', { syncId, frame: gameFrame });
     sendPeerMessage({ type: 'sync-start', syncId, frame: gameFrame });
     clearNetworkSync();
   }, NETWORK_SYNC_TIMEOUT_MS);
@@ -682,6 +683,7 @@ function requestInitialStateSync() {
   stateRequestInFlight = true;
   lastStateRequestAt = performance.now();
   setNetworkText('游戏已加载，正在同步 1P 进度...');
+  logNetworkEvent('state-request-sent', { syncId });
   sendPeerMessage({ type: 'state-request', syncId });
 }
 
@@ -757,6 +759,8 @@ function cancelPendingDirectConnection() {
   if (networkTransport !== 'relay' || !peerConnection || peerConnection.open) return;
   const connection = peerConnection;
   peerConnection = null;
+  clearTimeout(connection.__nesTimeoutId);
+  connection.__nesTimeoutId = 0;
   connection.__nesIgnore = true;
   connection.close();
   logNetworkEvent('pending-direct-cancelled-after-relay');
@@ -864,8 +868,10 @@ function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
   const connectionTimeout = window.setTimeout(() => {
     if (!connection.open) setNetworkText('连接超时：请确认 1P 房间仍然开启，并检查双方网络');
   }, 12000);
+  connection.__nesTimeoutId = connectionTimeout;
   connection.on('open', () => {
     clearTimeout(connectionTimeout);
+    connection.__nesTimeoutId = 0;
     logNetworkEvent('peer-connection-open');
     if (onOpen?.() === false) {
       connection.__nesIgnore = true;
@@ -877,6 +883,7 @@ function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
   connection.on('data', handleNetworkMessage);
   connection.on('close', () => {
     clearTimeout(connectionTimeout);
+    connection.__nesTimeoutId = 0;
     logNetworkEvent('peer-connection-close', { ignored: Boolean(connection.__nesIgnore) });
     if (connection.__nesIgnore) return;
     teardownPeerConnection();
@@ -884,6 +891,7 @@ function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
   });
   connection.on('error', (error) => {
     clearTimeout(connectionTimeout);
+    connection.__nesTimeoutId = 0;
     logNetworkEvent('peer-connection-error', { type: error?.type || '', message: error?.message || String(error) });
     if (connection.__nesIgnore) return;
     console.warn(error);
@@ -1064,7 +1072,8 @@ async function requestRelayTickets(nextRoomId, accessKey) {
 }
 
 function handleRelayControl(message) {
-  logNetworkEvent('relay-control', { type: message.__relay || 'unknown', peerConnected: Boolean(message.peerConnected) });
+  if (!message.__relay) return false;
+  logNetworkEvent('relay-control', { type: message.__relay, peerConnected: Boolean(message.peerConnected) });
   if (message.__relay === 'ready') {
     relayReady = true;
     refreshInviteLink();
@@ -1085,7 +1094,7 @@ function handleRelayControl(message) {
     teardownPeerConnection(networkRole === 'host' ? '2P 已离开，等待重新加入' : '1P 已离开房间');
     return true;
   }
-  return Boolean(message.__relay);
+  return true;
 }
 
 async function handleRelayData(data) {
@@ -1118,6 +1127,7 @@ async function handleRelayData(data) {
     handleNetworkMessage(message);
   } catch (error) {
     console.warn('无法读取公网中继消息', error);
+    logNetworkEvent('relay-json-error', { name: error?.name || 'Error', message: error?.message || String(error), textBytes: data.length });
   }
 }
 
