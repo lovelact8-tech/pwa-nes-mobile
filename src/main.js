@@ -13,7 +13,6 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // the host even on a LAN; the relay/PeerJS transport already queues packets.
 const NET_INPUT_DELAY_FRAMES = 1;
 const NET_CLOCK_INTERVAL_MS = 100;
-const HYBRID_DIRECT_TIMEOUT_MS = 5000;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 
 const landing = document.querySelector('#landing');
@@ -75,6 +74,7 @@ if (!isStandalone) document.body.classList.add('browser-mode');
 let nes = null;
 let lastRomData = null;
 let lastRomName = '';
+let lastRomLibraryPath = '';
 let running = false;
 let paused = false;
 let rafId = 0;
@@ -103,6 +103,7 @@ let relaySocket = null;
 let relayReady = false;
 let relayPendingRomName = '';
 let relayPendingRomEncoding = '';
+let relayPendingState = null;
 let relayGuestTicket = '';
 let relayDataQueue = Promise.resolve();
 let hybridRoom = false;
@@ -567,7 +568,7 @@ function base64ToBytes(value) {
 }
 
 function encodeNetworkState(state) {
-  return bytesToBase64(gzipSync(strToU8(JSON.stringify(state)), { level: 6 }));
+  return bytesToBase64(gzipSync(strToU8(JSON.stringify(state)), { level: 9 }));
 }
 
 function decodeNetworkState(value) {
@@ -583,6 +584,17 @@ function sendTransportMessage(message) {
       const payload = useCompressed ? compressedBytes : rawBytes;
       logNetworkEvent('relay-rom-send', { rawBytes: rawBytes.length, wireBytes: payload.length, encoding: useCompressed ? 'gzip' : 'raw' });
       relaySocket.send(JSON.stringify({ __nes: 'rom', name: message.name || 'NES 游戏', encoding: useCompressed ? 'gzip' : 'raw' }));
+      relaySocket.send(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
+      return;
+    }
+    if (message.type === 'state-gzip') {
+      const payload = base64ToBytes(message.data);
+      logNetworkEvent('relay-state-send', { syncId: message.syncId || 'none', wireBytes: payload.length, frame: message.frame });
+      relaySocket.send(JSON.stringify({
+        __nes: 'state-gzip',
+        syncId: message.syncId || '',
+        frame: Number(message.frame) || 0,
+      }));
       relaySocket.send(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
       return;
     }
@@ -728,7 +740,37 @@ function applyPeerRom(romData, name = 'NES 游戏') {
   pendingPeerRomData = romData;
   lastRomData = romData;
   lastRomName = name;
+  lastRomLibraryPath = '';
   startRom(romData, name);
+}
+
+function sendCurrentRomToPeer({ forceBinary = false } = {}) {
+  if (networkRole !== 'host' || !lastRomData) return;
+  if (!forceBinary && lastRomLibraryPath) {
+    sendPeerMessage({ type: 'rom-library', name: lastRomName, path: lastRomLibraryPath });
+  } else {
+    sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
+  }
+  peerRomSent = true;
+}
+
+async function applyPeerLibraryRom(message) {
+  const path = String(message.path || '');
+  if (!path || path.includes('..') || path.includes('://') || !/\.zip$/i.test(path)) {
+    throw new Error('游戏库路径无效');
+  }
+  const response = await fetch(`${import.meta.env.BASE_URL}${path}`);
+  if (!response.ok) throw new Error(`游戏下载失败：${response.status}`);
+  const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+  const romEntry = Object.entries(files).find(([name]) => name.toLowerCase().endsWith('.nes'));
+  if (!romEntry) throw new Error('压缩包中没有找到 .nes 文件');
+  const [, bytes] = romEntry;
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const romData = arrayBufferToBinary(buffer);
+  logNetworkEvent('library-rom-received', { name: message.name || 'NES 游戏', bytes: bytes.length });
+  applyPeerRom(romData, message.name || 'NES 游戏');
+  peerRomSent = true;
+  requestInitialStateSync();
 }
 
 function updateNetworkButtons() {
@@ -736,9 +778,9 @@ function updateNetworkButtons() {
   if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间';
   if (relayHostBtn) {
     relayHostBtn.classList.toggle('hidden', !RELAY_SERVER_URL);
-    relayHostBtn.textContent = networkRole === 'host' && hybridRoom && (relayReady || peerReady) ? '跨网房间已创建' : '创建跨网房间（直连优先）';
+    relayHostBtn.textContent = networkRole === 'host' && networkTransport === 'relay' && relayReady ? '跨网房间已创建' : '创建跨网房间';
     relayHostBtn.disabled = active || !RELAY_SERVER_URL;
-    relayHostBtn.title = RELAY_SERVER_URL ? '先尝试 WebRTC 直连，失败后使用私有公网中继' : '公网中继尚未部署';
+    relayHostBtn.title = RELAY_SERVER_URL ? '使用私人公网中继建立跨网房间' : '公网中继尚未部署';
   }
   relayAccessRow?.classList.toggle('hidden', !RELAY_SERVER_URL || active);
   if (netHostBtn) netHostBtn.disabled = active;
@@ -783,6 +825,7 @@ function teardownPeer() {
   relayReady = false;
   relayPendingRomName = '';
   relayPendingRomEncoding = '';
+  relayPendingState = null;
   relayGuestTicket = '';
   relayDataQueue = Promise.resolve();
 }
@@ -816,8 +859,7 @@ function markNetworkConnected() {
   setNetworkText(networkRole === 'host' ? `2P 已连接（${route}）` : `已通过${route}加入，等待游戏同步`);
   updateNetworkButtons();
   if (networkRole === 'host' && lastRomData && !peerRomSent) {
-    sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
-    peerRomSent = true;
+    sendCurrentRomToPeer();
   }
 }
 
@@ -871,6 +913,22 @@ function handleNetworkMessage(message) {
   if (message.type === 'clock' && networkRole === 'guest') {
     hostClockFrame = Number(message.frame) || 0;
     hostClockReceivedAt = performance.now();
+    return;
+  }
+  if (message.type === 'rom-library' && networkRole === 'guest') {
+    logNetworkEvent('library-rom-fetch-start', { name: message.name || 'NES 游戏' });
+    setNetworkText('正在从游戏库快速加载游戏...');
+    applyPeerLibraryRom(message).catch((error) => {
+      console.warn(error);
+      logNetworkEvent('library-rom-fetch-error', { message: error?.message || String(error) });
+      setNetworkText('游戏库加载失败，正在改用中继传输...');
+      sendPeerMessage({ type: 'rom-fallback-request' });
+    });
+    return;
+  }
+  if (message.type === 'rom-fallback-request' && networkRole === 'host') {
+    logNetworkEvent('relay-rom-fallback-requested');
+    sendCurrentRomToPeer({ forceBinary: true });
     return;
   }
   if (message.type === 'rom' && networkRole === 'guest') {
@@ -1005,8 +1063,7 @@ function createPeerRoom(nextRoomId) {
     setNetworkText('房间已创建，等待加入');
     updateNetworkButtons();
     if (lastRomData) {
-      sendPeerMessage({ type: 'rom', name: lastRomName, data: lastRomData });
-      peerRomSent = true;
+      sendCurrentRomToPeer();
     }
   });
   peer.on('connection', (connection) => {
@@ -1161,7 +1218,27 @@ async function handleRelayData(data) {
     data = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   }
   if (data instanceof ArrayBuffer) {
-    logNetworkEvent('relay-binary-received', { bytes: data.byteLength, pendingRom: Boolean(relayPendingRomName) });
+    logNetworkEvent('relay-binary-received', {
+      bytes: data.byteLength,
+      pendingRom: Boolean(relayPendingRomName),
+      pendingState: Boolean(relayPendingState),
+    });
+    if (relayPendingState) {
+      const pendingState = relayPendingState;
+      relayPendingState = null;
+      logNetworkEvent('relay-state-received', {
+        syncId: pendingState.syncId || 'none',
+        wireBytes: data.byteLength,
+        frame: pendingState.frame,
+      });
+      handleNetworkMessage({
+        type: 'state-gzip',
+        data: bytesToBase64(new Uint8Array(data)),
+        syncId: pendingState.syncId,
+        frame: pendingState.frame,
+      });
+      return;
+    }
     if (!relayPendingRomName) {
       logNetworkEvent('relay-binary-unexpected', { bytes: data.byteLength });
       return;
@@ -1184,6 +1261,14 @@ async function handleRelayData(data) {
       relayPendingRomName = message.name || 'NES 游戏';
       relayPendingRomEncoding = message.encoding || 'raw';
       logNetworkEvent('relay-rom-header', { name: relayPendingRomName, encoding: relayPendingRomEncoding });
+      return;
+    }
+    if (message.__nes === 'state-gzip') {
+      relayPendingState = {
+        syncId: String(message.syncId || ''),
+        frame: Number(message.frame) || 0,
+      };
+      logNetworkEvent('relay-state-header', relayPendingState);
       return;
     }
     handleNetworkMessage(message);
@@ -1275,12 +1360,11 @@ async function createHybridRoom(nextRoomId) {
   try {
     const tickets = await requestRelayTickets(nextRoom, accessKey);
     if (relayAccessKey) relayAccessKey.value = '';
-    // Bring the private relay online first, then also register a PeerJS host.
-    // The guest will prefer that direct connection and use this relay only if
-    // direct negotiation does not finish in time.
     connectRelay('host', nextRoom, tickets.hostToken, tickets.guestToken);
-    hybridRoom = true;
-    startHybridHostPeer(nextRoom);
+    // Local games already have a dedicated WebRTC room button. Cross-network
+    // invitations go straight to the private relay so guests do not spend five
+    // seconds attempting a connection that commonly fails across carrier NAT.
+    hybridRoom = false;
     refreshInviteLink();
     updateNetworkButtons();
   } catch (error) {
@@ -1294,58 +1378,11 @@ function joinHybridRoom(nextRoomId, ticket) {
     setNetworkText('跨网邀请链接不完整，请让 1P 重新复制链接');
     return;
   }
-  if (typeof Peer !== 'function') {
-    hybridRoom = true;
-    joinRelayRoom(nextRoomId, ticket);
-    return;
-  }
-  teardownPeer();
-  logNetworkEvent('hybrid-guest-start', { ticket: Boolean(ticket), directTimeoutMs: HYBRID_DIRECT_TIMEOUT_MS });
-  hybridRoom = true;
-  roomId = String(nextRoomId || '').trim();
-  networkTransport = 'peer';
-  networkRole = 'guest';
-  localPlayer = 2;
-  remotePlayer = 1;
-  peer = new Peer();
-  setNetworkText('正在尝试直连 1P...');
-  updateNetworkButtons();
-
-  const useRelayFallback = () => {
-    if (peerConnected || hybridFallbackStarted) return;
-    hybridFallbackStarted = true;
-    logNetworkEvent('hybrid-relay-fallback');
-    clearTimeout(hybridFallbackTimer);
-    hybridFallbackTimer = 0;
-    peer?.destroy?.();
-    peer = null;
-    peerReady = false;
-    hybridRoom = true;
-    setNetworkText('直连不可用，正在切换私有中继...');
-    connectRelay('guest', roomId, ticket);
-    hybridRoom = true;
-  };
-
-  hybridFallbackTimer = window.setTimeout(useRelayFallback, HYBRID_DIRECT_TIMEOUT_MS);
-  peer.on('open', () => {
-    logNetworkEvent('hybrid-guest-peer-ready');
-    peerReady = true;
-    const connection = peer.connect(roomId, { reliable: true });
-    configurePeerConnection(connection, {
-      onOpen: () => {
-        clearTimeout(hybridFallbackTimer);
-        hybridFallbackTimer = 0;
-        networkTransport = 'peer';
-        setNetworkText('已通过直连加入房间');
-      },
-      onFailure: useRelayFallback,
-    });
-  });
-  peer.on('error', (error) => {
-    console.warn('直连失败，准备使用中继', error);
-    logNetworkEvent('hybrid-guest-peer-error', { type: error?.type || '', message: error?.message || String(error) });
-    useRelayFallback();
-  });
+  // Previously copied hybrid links remain valid, but now skip the obsolete
+  // direct-first wait and enter the private relay immediately.
+  logNetworkEvent('hybrid-link-upgraded-to-relay', { ticket: Boolean(ticket) });
+  hybridRoom = false;
+  joinRelayRoom(nextRoomId, ticket);
 }
 
 function joinRelayRoom(nextRoomId, ticket) {
@@ -1640,6 +1677,7 @@ async function loadFile(file) {
   const romData = arrayBufferToBinary(buffer);
   lastRomData = romData;
   lastRomName = file.name;
+  lastRomLibraryPath = '';
   startRom(romData, file.name);
 }
 
@@ -1703,6 +1741,7 @@ async function loadLibraryGame(game) {
     const displayName = `${game.name}.nes`;
     lastRomData = arrayBufferToBinary(buffer);
     lastRomName = displayName;
+    lastRomLibraryPath = game.path;
     libraryDialog.close();
     startRom(lastRomData, displayName);
   } catch (error) {
@@ -1736,8 +1775,7 @@ function startRom(romData, name = 'NES 游戏') {
     pauseBtn.textContent = '暂停';
     setStatus(`正在玩：${name}`);
     if (networkRole === 'host' && peerConnected && lastRomData) {
-      sendPeerMessage({ type: 'rom', name, data: lastRomData });
-      peerRomSent = true;
+      sendCurrentRomToPeer();
     }
     startLoop();
   } catch (error) {
