@@ -124,6 +124,9 @@ let lastStateRequestAt = 0;
 let networkSyncPaused = false;
 let networkSyncId = '';
 let networkSyncTimeout = 0;
+let networkSyncProbeId = '';
+let networkSyncProbeSentAt = 0;
+let networkSyncProbeTimeout = 0;
 let stateRequestInFlight = false;
 let suppressEmulatorOutput = false;
 let networkRttMs = 0;
@@ -426,6 +429,7 @@ function getNetworkDiagnosticLog() {
     `relaySocket=${relaySocket?.readyState ?? 'none'}`,
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
+    `rttMs=${Math.round(networkRttMs)}`,
     `userAgent=${navigator.userAgent}`,
     '',
     ...networkLogEntries,
@@ -656,14 +660,24 @@ function sendPeerButtons(player, buttons) {
   if (networkRole === 'offline') return;
   const nextButtons = Array.from(buttons || []);
   if (networkRole === 'host') {
-    const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
-    logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame });
+    const delayFrames = getNetworkInputDelayFrames();
+    const frame = gameFrame + delayFrames;
+    logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame, delayFrames });
     scheduleNetworkInput(player, nextButtons, frame);
     sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame });
     return;
   }
   logNetworkEvent('input-send', { role: 'guest', player, buttons: nextButtons });
   sendPeerMessage({ type: 'input-request', player, buttons: nextButtons });
+}
+
+function getNetworkInputDelayFrames() {
+  if (networkTransport !== 'relay') return NET_INPUT_DELAY_FRAMES;
+  const rtt = networkRttMs > 0 ? networkRttMs : 1000;
+  // Schedule far enough into the future for the message to reach the other
+  // emulator before that frame. A small jitter allowance prevents a key-down
+  // and key-up from collapsing into the same late frame.
+  return Math.max(8, Math.min(90, Math.ceil((rtt / 2 + 140) / FRAME_MS)));
 }
 
 function scheduleNetworkInput(player, buttons, frame) {
@@ -698,8 +712,12 @@ function sendPeerSnapshot(syncId = '') {
 
 function clearNetworkSync() {
   clearTimeout(networkSyncTimeout);
+  clearTimeout(networkSyncProbeTimeout);
   networkSyncTimeout = 0;
+  networkSyncProbeTimeout = 0;
   networkSyncId = '';
+  networkSyncProbeId = '';
+  networkSyncProbeSentAt = 0;
   networkSyncPaused = false;
   stateRequestInFlight = false;
 }
@@ -753,6 +771,15 @@ function fastForwardNetworkToFrame(targetFrame) {
     targetFrame: target,
     finalFrame: gameFrame,
   });
+}
+
+function finishGuestStateSync(targetFrame, detail = {}) {
+  logNetworkEvent('sync-final-target', { targetFrame, ...detail });
+  fastForwardNetworkToFrame(targetFrame);
+  clearNetworkSync();
+  lastTick = 0;
+  frameRemainder = 0;
+  setNetworkText(`同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
 }
 
 function applyPeerRom(romData, name = 'NES 游戏') {
@@ -895,11 +922,18 @@ function handleNetworkMessage(message) {
     hostClockFrame = Number(message.frame) || hostClockFrame;
     hostClockReceivedAt = performance.now();
     logNetworkEvent('network-rtt', { ms: Math.round(networkRttMs) });
+    sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
+    return;
+  }
+  if (message.type === 'latency-report' && networkRole === 'host') {
+    const reportedRtt = Math.max(0, Math.min(5000, Number(message.rttMs) || 0));
+    if (reportedRtt) networkRttMs = reportedRtt;
     return;
   }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
-    const frame = gameFrame + NET_INPUT_DELAY_FRAMES;
-    logNetworkEvent('input-request-received', { player: message.player, buttons: message.buttons || [], frame });
+    const delayFrames = getNetworkInputDelayFrames();
+    const frame = gameFrame + delayFrames;
+    logNetworkEvent('input-request-received', { player: message.player, buttons: message.buttons || [], frame, delayFrames });
     scheduleNetworkInput(message.player, message.buttons, frame);
     sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame });
     return;
@@ -917,13 +951,38 @@ function handleNetworkMessage(message) {
     setNetworkText(`2P 同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
     return;
   }
+  if (message.type === 'sync-frame-request' && networkRole === 'host') {
+    sendPeerMessage({
+      type: 'sync-frame',
+      syncId: message.syncId || '',
+      probeId: message.probeId || '',
+      frame: gameFrame,
+    });
+    return;
+  }
   if (message.type === 'sync-start' && networkRole === 'guest' && message.syncId === networkSyncId) {
     logNetworkEvent('sync-start-received', { syncId: message.syncId, frame: message.frame });
-    fastForwardNetworkToFrame(message.frame);
-    clearNetworkSync();
-    lastTick = 0;
-    frameRemainder = 0;
-    setNetworkText(`同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
+    networkSyncProbeId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    networkSyncProbeSentAt = performance.now();
+    setNetworkText('进度已接收，正在校准双方画面...');
+    sendPeerMessage({ type: 'sync-frame-request', syncId: networkSyncId, probeId: networkSyncProbeId });
+    const fallbackFrame = Number(message.frame) || gameFrame;
+    networkSyncProbeTimeout = window.setTimeout(() => {
+      if (!networkSyncId || !networkSyncProbeId) return;
+      logNetworkEvent('sync-frame-probe-timeout', { probeId: networkSyncProbeId });
+      finishGuestStateSync(fallbackFrame, { fallback: true });
+    }, 5000);
+    return;
+  }
+  if (message.type === 'sync-frame' && networkRole === 'guest'
+    && message.syncId === networkSyncId && message.probeId === networkSyncProbeId) {
+    const probeRtt = Math.max(0, performance.now() - networkSyncProbeSentAt);
+    networkRttMs = networkRttMs ? networkRttMs * 0.5 + probeRtt * 0.5 : probeRtt;
+    const bufferFrames = networkTransport === 'relay' ? 4 : 1;
+    const transitFrames = Math.max(0, Math.round((probeRtt / 2) / FRAME_MS) - bufferFrames);
+    const targetFrame = (Number(message.frame) || gameFrame) + transitFrames;
+    sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
+    finishGuestStateSync(targetFrame, { probeRttMs: Math.round(probeRtt), transitFrames });
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
