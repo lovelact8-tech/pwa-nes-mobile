@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
 
 const port = 18787;
 const accessKey = 'test-access-key-only';
 const tokenSecret = 'test-signing-secret-at-least-32-characters';
+const turnSecret = 'test-turn-shared-secret-at-least-32-characters';
+const turnUrl = 'turn:100.125.58.33:3478?transport=udp';
 const server = spawn(process.execPath, ['relay-server/server.mjs'], {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(port), RELAY_ACCESS_KEY: accessKey, RELAY_TOKEN_SECRET: tokenSecret },
+  env: {
+    ...process.env,
+    PORT: String(port),
+    RELAY_ACCESS_KEY: accessKey,
+    RELAY_TOKEN_SECRET: tokenSecret,
+    TURN_SHARED_SECRET: turnSecret,
+    TURN_URLS: turnUrl,
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 
@@ -43,7 +53,11 @@ assert.ok(tickets.guestToken);
 
 const openClient = (role, ticket) => new Promise((resolve, reject) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/relay?room=${room}&role=${role}&ticket=${encodeURIComponent(ticket)}`, { origin });
-  socket.once('open', () => resolve(socket));
+  socket.on('message', (data, isBinary) => {
+    if (isBinary) return;
+    const message = JSON.parse(data.toString());
+    if (message.__relay === 'ready') resolve({ socket, ready: message });
+  });
   socket.once('error', reject);
 });
 const waitForMessage = (socket, predicate) => new Promise((resolve, reject) => {
@@ -58,8 +72,16 @@ const waitForMessage = (socket, predicate) => new Promise((resolve, reject) => {
   socket.on('message', listener);
 });
 
-const host = await openClient('host', tickets.hostToken);
-const guest = await openClient('guest', tickets.guestToken);
+const hostClient = await openClient('host', tickets.hostToken);
+const guestClient = await openClient('guest', tickets.guestToken);
+const host = hostClient.socket;
+const guest = guestClient.socket;
+for (const ready of [hostClient.ready, guestClient.ready]) {
+  assert.deepEqual(ready.turn.urls, [turnUrl]);
+  assert.ok(Number(ready.turn.expiresAt) > Math.floor(Date.now() / 1000));
+  const expectedCredential = crypto.createHmac('sha1', turnSecret).update(ready.turn.username).digest('base64');
+  assert.equal(ready.turn.credential, expectedCredential);
+}
 const inputPromise = waitForMessage(guest, (data, binary) => !binary && JSON.parse(data).type === 'input');
 host.send(JSON.stringify({ type: 'input', player: 1, buttons: ['A'], frame: 42 }));
 assert.equal(JSON.parse(await inputPromise).frame, 42);
@@ -72,4 +94,4 @@ assert.deepEqual(await romPromise, rom);
 host.close();
 guest.close();
 server.kill('SIGTERM');
-console.log('Relay text and binary forwarding passed');
+console.log('Relay TURN credentials, text, and binary forwarding passed');
