@@ -9,17 +9,18 @@ const FRAMEBUFFER_SIZE = SCREEN_WIDTH * SCREEN_HEIGHT;
 const FRAME_MS = 1000 / 60;
 const MAX_FRAME_DELTA_MS = FRAME_MS * 3;
 const MAX_PEER_QUEUE_SIZE = 32;
-// Keep only one frame of buffering. Four frames made the guest visibly trail
-// the host even on a LAN; the relay/PeerJS transport already queues packets.
-const NET_INPUT_DELAY_FRAMES = 1;
+// Apply authoritative input on the next emulation tick. Adding a fixed frame
+// here delays both players without improving an already-buffered relay guest.
+const NET_INPUT_DELAY_FRAMES = 0;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_JITTER_BUFFER_MS = 50;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 4;
+const RELAY_MIN_JITTER_BUFFER_MS = 12;
+const RELAY_MAX_JITTER_BUFFER_MS = 80;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 2;
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
@@ -140,6 +141,7 @@ let networkSyncProbeTimeout = 0;
 let stateRequestInFlight = false;
 let suppressEmulatorOutput = false;
 let networkRttMs = 0;
+let networkRttJitterMs = 0;
 let networkPingId = '';
 let networkPingSentAt = 0;
 let lastNetworkPingAt = 0;
@@ -452,6 +454,7 @@ function getNetworkDiagnosticLog() {
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
     `rttMs=${Math.round(networkRttMs)}`,
+    `rttJitterMs=${Math.round(networkRttJitterMs)}`,
     `guestBufferFrames=${getRelayGuestBufferFrames()}`,
     `gameFrame=${gameFrame}`,
     `hostFrame=${hostClockFrame ?? 'none'}`,
@@ -709,20 +712,42 @@ function recordNetworkRtt(sampleMs, source = 'ping') {
   const sample = Math.max(1, Math.min(5000, parsedSample));
   if (!networkRttMs) {
     networkRttMs = sample;
+    networkRttJitterMs = 4;
   } else {
+    const previousRtt = networkRttMs;
+    const routeBecameFaster = sample < previousRtt * 0.6;
+    const deviation = Math.abs(sample - previousRtt);
+    if (routeBecameFaster) {
+      // DERP often hands over to a direct Tailscale path. Do not keep the old
+      // route's large variation as artificial input delay after that switch.
+      networkRttJitterMs = Math.min(networkRttJitterMs || 4, 4);
+    } else {
+      const jitterWeight = deviation < networkRttJitterMs ? 0.45 : 0.25;
+      networkRttJitterMs += (deviation - networkRttJitterMs) * jitterWeight;
+    }
     // A route commonly starts on DERP and then becomes direct. Fall quickly
     // when that happens, but increase slowly for isolated mobile-network
     // spikes so one bad packet cannot add a permanent second of buffering.
-    const weight = sample < networkRttMs ? 0.65 : 0.2;
+    const weight = routeBecameFaster ? 0.8 : sample < networkRttMs ? 0.65 : 0.2;
     networkRttMs += (sample - networkRttMs) * weight;
   }
   logNetworkEvent('network-rtt', {
     source,
     sampleMs: Math.round(sample),
     smoothedMs: Math.round(networkRttMs),
+    jitterMs: Math.round(networkRttJitterMs),
+    jitterBufferMs: getRelayJitterBufferMs(),
     bufferFrames: getRelayGuestBufferFrames(networkRttMs),
   });
   return networkRttMs;
+}
+
+function getRelayJitterBufferMs() {
+  if (!networkRttMs) return 24;
+  return Math.max(
+    RELAY_MIN_JITTER_BUFFER_MS,
+    Math.min(RELAY_MAX_JITTER_BUFFER_MS, Math.round(8 + networkRttJitterMs * 1.25)),
+  );
 }
 
 function getRelayGuestBufferFrames(rttMs = networkRttMs) {
@@ -730,7 +755,7 @@ function getRelayGuestBufferFrames(rttMs = networkRttMs) {
   const rtt = rttMs > 0 ? rttMs : DEFAULT_NETWORK_RTT_MS;
   return Math.max(
     RELAY_MIN_GUEST_BUFFER_FRAMES,
-    Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + RELAY_JITTER_BUFFER_MS) / FRAME_MS)),
+    Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + getRelayJitterBufferMs()) / FRAME_MS)),
   );
 }
 
@@ -926,6 +951,7 @@ function teardownPeerConnection(finalStatus = '') {
   clearNetworkSync();
   lastNetworkClockAt = 0;
   networkRttMs = 0;
+  networkRttJitterMs = 0;
   networkPingId = '';
   networkPingSentAt = 0;
   lastNetworkPingAt = 0;
