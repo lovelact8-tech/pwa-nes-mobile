@@ -56,6 +56,8 @@ const netCopyBtn = document.querySelector('#netCopyBtn');
 const netLeaveBtn = document.querySelector('#netLeaveBtn');
 const netLinkInput = document.querySelector('#netLinkInput');
 const netStatusText = document.querySelector('#netStatusText');
+const netLogBtn = document.querySelector('#netLogBtn');
+const netLogOutput = document.querySelector('#netLogOutput');
 const layoutEditBtn = document.querySelector('#layoutEditBtn');
 const resetLayoutBtn = document.querySelector('#resetLayoutBtn');
 const closeSettingsBtn = document.querySelector('#closeSettingsBtn');
@@ -120,6 +122,8 @@ let networkSyncPaused = false;
 let networkSyncId = '';
 let networkSyncTimeout = 0;
 let stateRequestInFlight = false;
+const networkLogEntries = [];
+const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
 const RELAY_SERVER_URL = String(import.meta.env.VITE_RELAY_URL || '').trim();
 
@@ -374,7 +378,54 @@ function loadGameState() {
   }
 }
 
+function getSafeNetworkDetail(detail = {}) {
+  const safe = {};
+  for (const [key, value] of Object.entries(detail)) {
+    if (/ticket|access|token|secret/i.test(key)) {
+      safe[key] = value ? '[present]' : '[missing]';
+      continue;
+    }
+    safe[key] = value;
+  }
+  return safe;
+}
+
+function logNetworkEvent(event, detail = {}) {
+  const elapsed = ((performance.now() - networkLogStartedAt) / 1000).toFixed(3);
+  const safeDetail = getSafeNetworkDetail(detail);
+  const suffix = Object.keys(safeDetail).length ? ` ${JSON.stringify(safeDetail)}` : '';
+  const line = `[+${elapsed}s] ${event}${suffix}`;
+  networkLogEntries.push(line);
+  if (networkLogEntries.length > 240) networkLogEntries.shift();
+  if (netLogOutput) netLogOutput.textContent = networkLogEntries.join('\n');
+  console.info(`[NES NET] ${event}`, safeDetail);
+}
+
+function getNetworkDiagnosticLog() {
+  const roomHint = roomId ? `${roomId.slice(0, 4)}…${roomId.slice(-4)}` : 'none';
+  return [
+    'PWA NES 联机诊断日志',
+    `time=${new Date().toISOString()}`,
+    `page=${location.origin}${location.pathname}`,
+    `online=${navigator.onLine}`,
+    `role=${networkRole}`,
+    `transport=${networkTransport}`,
+    `hybrid=${hybridRoom}`,
+    `room=${roomHint}`,
+    `peerReady=${peerReady}`,
+    `peerConnected=${peerConnected}`,
+    `relayReady=${relayReady}`,
+    `relaySocket=${relaySocket?.readyState ?? 'none'}`,
+    `syncPaused=${networkSyncPaused}`,
+    `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
+    `userAgent=${navigator.userAgent}`,
+    '',
+    ...networkLogEntries,
+  ].join('\n');
+}
+
 function setNetworkText(text) {
+  logNetworkEvent('status', { text });
   if (netStatusText) netStatusText.textContent = text;
   if (inviteStatusText && (networkRole === 'guest' || new URLSearchParams(window.location.search).has('room'))) {
     inviteStatusText.textContent = text;
@@ -589,9 +640,11 @@ function applyScheduledNetworkInputs() {
 function sendPeerSnapshot(syncId = '') {
   if (networkRole !== 'host' || !nes || !peerConnected) return;
   try {
+    const encodedState = encodeNetworkState(nes.toJSON());
+    logNetworkEvent('state-send', { syncId: syncId || 'none', base64Bytes: encodedState.length, frame: gameFrame });
     sendPeerMessage({
       type: 'state-gzip',
-      data: encodeNetworkState(nes.toJSON()),
+      data: encodedState,
       frame: gameFrame,
       syncId,
     });
@@ -720,17 +773,20 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'state-request' && networkRole === 'host') {
+    logNetworkEvent('state-request-received', { syncId: message.syncId || 'legacy' });
     if (message.syncId) startHostStateSync(message.syncId);
     else sendPeerSnapshot();
     return;
   }
   if (message.type === 'state-applied' && networkRole === 'host' && message.syncId === networkSyncId) {
+    logNetworkEvent('state-applied-ack', { syncId: message.syncId, frame: gameFrame });
     sendPeerMessage({ type: 'sync-start', syncId: networkSyncId, frame: gameFrame });
     clearNetworkSync();
     setNetworkText(`2P 同步完成（${networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连'}）`);
     return;
   }
   if (message.type === 'sync-start' && networkRole === 'guest' && message.syncId === networkSyncId) {
+    logNetworkEvent('sync-start-received', { syncId: message.syncId, frame: message.frame });
     clearNetworkSync();
     lastTick = 0;
     frameRemainder = 0;
@@ -747,6 +803,7 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'rom' && networkRole === 'guest') {
+    logNetworkEvent('rom-received', { name: message.name || 'NES 游戏', bytes: String(message.data || '').length });
     applyPeerRom(message.data, message.name || 'NES 游戏');
     peerRomSent = true;
     requestInitialStateSync();
@@ -755,6 +812,7 @@ function handleNetworkMessage(message) {
   if (message.type === 'state-gzip' && nes && networkRole === 'guest') {
     if (networkSyncId && message.syncId && message.syncId !== networkSyncId) return;
     try {
+      logNetworkEvent('state-received', { syncId: message.syncId || 'none', base64Bytes: String(message.data || '').length, frame: message.frame });
       suppressNetworkBroadcast = true;
       nes.fromJSON(decodeNetworkState(message.data));
       gameFrame = Number(message.frame) || 0;
@@ -762,9 +820,11 @@ function handleNetworkMessage(message) {
       networkSyncPaused = true;
       syncButtonVisuals();
       sendPeerMessage({ type: 'state-applied', syncId: message.syncId || networkSyncId });
+      logNetworkEvent('state-applied-sent', { syncId: message.syncId || networkSyncId, frame: gameFrame });
       setNetworkText('进度已接收，正在同时开始...');
     } catch (error) {
       console.warn(error);
+      logNetworkEvent('state-apply-error', { name: error?.name || 'Error', message: error?.message || String(error) });
       clearNetworkSync();
       setNetworkText('同步状态读取失败，请重新加入房间');
     } finally {
@@ -788,12 +848,14 @@ function handleNetworkMessage(message) {
 }
 
 function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
+  logNetworkEvent('peer-connection-created', { peer: connection?.peer || 'unknown' });
   peerConnection = connection;
   const connectionTimeout = window.setTimeout(() => {
     if (!connection.open) setNetworkText('连接超时：请确认 1P 房间仍然开启，并检查双方网络');
   }, 12000);
   connection.on('open', () => {
     clearTimeout(connectionTimeout);
+    logNetworkEvent('peer-connection-open');
     if (onOpen?.() === false) {
       connection.__nesIgnore = true;
       connection.close();
@@ -804,12 +866,14 @@ function configurePeerConnection(connection, { onOpen, onFailure } = {}) {
   connection.on('data', handleNetworkMessage);
   connection.on('close', () => {
     clearTimeout(connectionTimeout);
+    logNetworkEvent('peer-connection-close', { ignored: Boolean(connection.__nesIgnore) });
     if (connection.__nesIgnore) return;
     teardownPeerConnection();
     onFailure?.();
   });
   connection.on('error', (error) => {
     clearTimeout(connectionTimeout);
+    logNetworkEvent('peer-connection-error', { type: error?.type || '', message: error?.message || String(error) });
     if (connection.__nesIgnore) return;
     console.warn(error);
     teardownPeerConnection(getPeerErrorText('联机连接', error));
@@ -886,13 +950,16 @@ function createPeerRoom(nextRoomId) {
 
 function startHybridHostPeer(nextRoomId) {
   if (typeof Peer !== 'function') return;
+  logNetworkEvent('hybrid-host-direct-register', { room: `${nextRoomId.slice(0, 4)}…${nextRoomId.slice(-4)}` });
   peer = new Peer(nextRoomId);
   peer.on('open', () => {
+    logNetworkEvent('hybrid-host-direct-ready');
     peerReady = true;
     refreshInviteLink();
     updateNetworkButtons();
   });
   peer.on('connection', (connection) => {
+    logNetworkEvent('hybrid-host-direct-incoming');
     if (peerConnected) {
       connection.close();
       return;
@@ -911,6 +978,7 @@ function startHybridHostPeer(nextRoomId) {
     // The relay stays available, so a direct-host registration failure is not
     // fatal for a cross-network room.
     console.warn('直连候选不可用，将继续等待中继加入', error);
+    logNetworkEvent('hybrid-host-direct-error', { type: error?.type || '', message: error?.message || String(error) });
   });
 }
 
@@ -970,12 +1038,14 @@ function getRelayTicketUrl() {
 }
 
 async function requestRelayTickets(nextRoomId, accessKey) {
+  logNetworkEvent('relay-ticket-request', { room: `${nextRoomId.slice(0, 4)}…${nextRoomId.slice(-4)}`, accessKey: Boolean(accessKey) });
   const response = await fetch(getRelayTicketUrl(), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ roomId: nextRoomId, accessKey }),
   });
   const result = await response.json().catch(() => ({}));
+  logNetworkEvent('relay-ticket-response', { status: response.status, ok: response.ok, hostToken: Boolean(result.hostToken), guestToken: Boolean(result.guestToken), error: result.error || '' });
   if (!response.ok || !result.hostToken || !result.guestToken) {
     throw new Error(result.error || '私人访问码验证失败');
   }
@@ -983,6 +1053,7 @@ async function requestRelayTickets(nextRoomId, accessKey) {
 }
 
 function handleRelayControl(message) {
+  logNetworkEvent('relay-control', { type: message.__relay || 'unknown', peerConnected: Boolean(message.peerConnected) });
   if (message.__relay === 'ready') {
     relayReady = true;
     refreshInviteLink();
@@ -1033,6 +1104,7 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
     return;
   }
   if (!ticket) {
+    logNetworkEvent('relay-connect-rejected', { role, ticket: false });
     setNetworkText('邀请票据无效，请让 1P 重新创建跨网房间');
     return;
   }
@@ -1047,14 +1119,20 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   socketUrl.searchParams.set('room', roomId);
   socketUrl.searchParams.set('role', role);
   socketUrl.searchParams.set('ticket', ticket);
+  logNetworkEvent('relay-connect-start', { role, room: `${roomId.slice(0, 4)}…${roomId.slice(-4)}`, ticket: Boolean(ticket), host: socketUrl.host });
   relaySocket = new WebSocket(socketUrl);
   relaySocket.binaryType = 'arraybuffer';
   setNetworkText(role === 'host' ? '正在创建跨网房间...' : '正在加入跨网房间...');
   refreshInviteLink();
   updateNetworkButtons();
   relaySocket.onmessage = (event) => handleRelayData(event.data);
-  relaySocket.onerror = () => setNetworkText('公网中继连接失败，请确认服务器在线');
+  relaySocket.onopen = () => logNetworkEvent('relay-websocket-open', { role });
+  relaySocket.onerror = () => {
+    logNetworkEvent('relay-websocket-error', { role, readyState: relaySocket?.readyState });
+    setNetworkText('公网中继连接失败，请确认服务器在线');
+  };
   relaySocket.onclose = (event) => {
+    logNetworkEvent('relay-websocket-close', { role, code: event.code, reason: event.reason || '', clean: event.wasClean });
     relayReady = false;
     const reason = event.reason ? `：${event.reason}` : '';
     teardownPeerConnection(`公网中继已断开${reason}`);
@@ -1117,6 +1195,7 @@ function joinHybridRoom(nextRoomId, ticket) {
     return;
   }
   teardownPeer();
+  logNetworkEvent('hybrid-guest-start', { ticket: Boolean(ticket), directTimeoutMs: HYBRID_DIRECT_TIMEOUT_MS });
   hybridRoom = true;
   roomId = String(nextRoomId || '').trim();
   networkTransport = 'peer';
@@ -1130,6 +1209,7 @@ function joinHybridRoom(nextRoomId, ticket) {
   const useRelayFallback = () => {
     if (peerConnected || hybridFallbackStarted) return;
     hybridFallbackStarted = true;
+    logNetworkEvent('hybrid-relay-fallback');
     clearTimeout(hybridFallbackTimer);
     hybridFallbackTimer = 0;
     peer?.destroy?.();
@@ -1143,6 +1223,7 @@ function joinHybridRoom(nextRoomId, ticket) {
 
   hybridFallbackTimer = window.setTimeout(useRelayFallback, HYBRID_DIRECT_TIMEOUT_MS);
   peer.on('open', () => {
+    logNetworkEvent('hybrid-guest-peer-ready');
     peerReady = true;
     const connection = peer.connect(roomId, { reliable: true });
     configurePeerConnection(connection, {
@@ -1157,6 +1238,7 @@ function joinHybridRoom(nextRoomId, ticket) {
   });
   peer.on('error', (error) => {
     console.warn('直连失败，准备使用中继', error);
+    logNetworkEvent('hybrid-guest-peer-error', { type: error?.type || '', message: error?.message || String(error) });
     useRelayFallback();
   });
 }
@@ -1759,6 +1841,26 @@ netCopyBtn.addEventListener('click', async () => {
     setNetworkText('邀请链接已复制');
   }
 });
+netLogBtn.addEventListener('click', async () => {
+  logNetworkEvent('diagnostic-log-copy');
+  const log = getNetworkDiagnosticLog();
+  try {
+    await navigator.clipboard.writeText(log);
+    setNetworkText('联机诊断日志已复制');
+  } catch (error) {
+    console.warn(error);
+    const textarea = document.createElement('textarea');
+    textarea.value = log;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+    setNetworkText('联机诊断日志已复制');
+  }
+});
 netLeaveBtn.addEventListener('click', () => {
   teardownPeer();
   hybridRoom = false;
@@ -2208,6 +2310,7 @@ applyControlOffsets();
 applyControlOpacity(localStorage.getItem(CONTROL_OPACITY_STORAGE_KEY) || 90);
 updateSoundButton();
 updateFullscreenButton();
+logNetworkEvent('app-start', { relayConfigured: Boolean(RELAY_SERVER_URL), online: navigator.onLine });
 restoreNetworkRoom();
 
 if ('serviceWorker' in navigator) {

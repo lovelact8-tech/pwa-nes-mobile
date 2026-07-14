@@ -101,6 +101,9 @@ dialog button { width: 100%; background: rgba(255,255,255,.13); margin: 5px 0; }
 .menuGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .menuGrid button, .menuGrid .fileBtn { min-height: 43px; margin: 0; padding: 9px; border-radius: 12px; font-size: 13px; }
 .menuFooterActions { display: grid; grid-template-columns: 1fr 1.35fr; gap: 7px; }
+.networkLogDetails { margin-top: 8px; color: #94a3b8; font-size: 12px; }
+.networkLogDetails summary { cursor: pointer; padding: 7px 2px; user-select: none; }
+.networkLogDetails pre { max-height: 180px; margin: 6px 0 0; padding: 9px; overflow: auto; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(2,6,23,.72); color: #cbd5e1; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; }
 .menuFooterActions button { margin: 0; }
 .dangerButton { background: rgba(190,18,60,.2) !important; color: #fecdd3; border: 1px solid rgba(244,63,94,.2) !important; }
 .networkStatus { margin: 5px 0 0; padding: 9px 10px; border-radius: 11px; background: rgba(59,130,246,.1); color: #bfdbfe; font-size: 12px; line-height: 1.4; }

@@ -112,6 +112,11 @@
           </div>
           <input id="netLinkInput" class="netLink" type="text" readonly aria-label="联机邀请链接" />
           <p id="netStatusText" class="networkStatus" role="status">未联机</p>
+          <button id="netLogBtn" type="button">复制联机诊断日志</button>
+          <details class="networkLogDetails">
+            <summary>查看联机日志</summary>
+            <pre id="netLogOutput" aria-live="polite"></pre>
+          </details>
         </section>
         <section class="menuSection menuFooterActions">
           <button id="resetBtn" class="dangerButton">重启游戏</button>
