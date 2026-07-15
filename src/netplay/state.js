@@ -160,12 +160,22 @@ export function deterministicStateView(state) {
   };
 }
 
-export function hashDeterministicState(state) {
-  const text = JSON.stringify(deterministicStateView(state));
+function hashValue(value) {
+  const text = JSON.stringify(value);
   let hash = 2166136261;
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function hashDeterministicComponents(state) {
+  return Object.fromEntries(
+    Object.entries(deterministicStateView(state)).map(([name, value]) => [name, hashValue(value)]),
+  );
+}
+
+export function hashDeterministicState(state) {
+  return hashValue(deterministicStateView(state));
 }

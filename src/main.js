@@ -5,7 +5,12 @@ import { gzipSync, gunzipSync, strFromU8, strToU8, unzipSync } from 'fflate';
 import { ui } from './ui/dom.js';
 import { hydrateIcons } from './ui/icons.js';
 import { createDialogController } from './ui/dialogs.js';
-import { captureDeterministicState, restoreDeterministicState, hashDeterministicState } from './netplay/state.js';
+import {
+  captureDeterministicState,
+  restoreDeterministicState,
+  hashDeterministicState,
+  hashDeterministicComponents,
+} from './netplay/state.js';
 import { inputPayload, messageButtons } from './netplay/input.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import {
@@ -1314,7 +1319,11 @@ function sendPeerButtons(player, buttons) {
     GUEST_INPUT_MIN_LEAD_FRAMES,
     Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames + guestInputSafetyFrames),
   );
-  const lowLatencyRollback = networkRttMs > 0 && networkRttMs <= 120 && networkRttJitterMs <= 35;
+  // Rewinding jsnes is much more expensive than a native fighting-game core.
+  // Only predict into the very next frame on a genuinely LAN-like route.
+  // A 35–50ms Tailscale path otherwise makes virtually every press/release
+  // arrive behind the host and causes dozens of 10–45ms replays per second.
+  const lowLatencyRollback = networkRttMs > 0 && networkRttMs <= 22 && networkRttJitterMs <= 8;
   const frame = lowLatencyRollback
     ? gameFrame + 1
     : Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
@@ -1468,14 +1477,23 @@ function hashRollbackState(state) {
   return hashDeterministicState(state);
 }
 
-function compareRollbackStateCheck(snapshot, expectedHash) {
+function compareRollbackStateCheck(snapshot, expectedHash, expectedComponents = null) {
   const actualHash = snapshot.hash || (snapshot.hash = hashRollbackState(snapshot.state));
   const match = actualHash === expectedHash;
-  logNetworkEvent(match ? 'state-check-ok' : 'state-check-mismatch', {
+  const details = {
     frame: snapshot.frame,
     expectedHash,
     actualHash,
-  });
+  };
+  if (!match && expectedComponents) {
+    const actualComponents = hashDeterministicComponents(snapshot.state);
+    details.componentDiffs = Object.keys(expectedComponents).filter(
+      (name) => expectedComponents[name] !== actualComponents[name],
+    );
+    details.expectedComponents = expectedComponents;
+    details.actualComponents = actualComponents;
+  }
+  logNetworkEvent(match ? 'state-check-ok' : 'state-check-mismatch', details);
   pendingStateChecks.delete(snapshot.frame);
   stateCheckStatus = match ? '一致' : '差异';
   stateCheckFrame = snapshot.frame;
@@ -1498,12 +1516,14 @@ function processRollbackStateCheck(snapshot) {
     if (!stableSnapshot) return;
     lastStateCheckFrame = stableSnapshot.frame;
     const hash = stableSnapshot.hash || (stableSnapshot.hash = hashRollbackState(stableSnapshot.state));
-    sendPeerMessage({ type: 'state-check', frame: stableSnapshot.frame, hash });
-    logNetworkEvent('state-check-send', { frame: stableSnapshot.frame, hash });
+    const components = hashDeterministicComponents(stableSnapshot.state);
+    sendPeerMessage({ type: 'state-check', frame: stableSnapshot.frame, hash, components });
+    logNetworkEvent('state-check-send', { frame: stableSnapshot.frame, hash, components });
     return;
   }
   if (networkRole === 'guest' && pendingStateChecks.has(snapshot.frame)) {
-    compareRollbackStateCheck(snapshot, pendingStateChecks.get(snapshot.frame));
+    const pending = pendingStateChecks.get(snapshot.frame);
+    compareRollbackStateCheck(snapshot, pending.hash, pending.components);
   }
 }
 
@@ -1642,7 +1662,9 @@ function scheduleNetworkInput(player, buttons, frame, {
   const existing = networkInputHistory.find((input) => input.id === inputId);
   if (existing) {
     rollbackFrame = Math.min(existing.frame, requestedFrame);
-    corrected = existing.frame !== requestedFrame || existing.player !== player || !buttonsMatch(existing.buttons, normalizedButtons);
+    corrected = existing.frame !== requestedFrame
+      || existing.player !== player
+      || !buttonsMatch(existing.buttons, normalizedButtons);
     existing.player = player;
     existing.buttons = normalizedButtons;
     existing.frame = requestedFrame;
@@ -2014,10 +2036,13 @@ function handleNetworkMessage(message) {
   if (message.type === 'state-check' && networkRole === 'guest') {
     const frame = Math.max(0, Math.floor(Number(message.frame) || 0));
     const expectedHash = String(message.hash || '');
+    const expectedComponents = message.components && typeof message.components === 'object'
+      ? message.components
+      : null;
     const snapshot = rollbackSnapshots.find((candidate) => candidate.frame === frame);
-    if (snapshot) compareRollbackStateCheck(snapshot, expectedHash);
+    if (snapshot) compareRollbackStateCheck(snapshot, expectedHash, expectedComponents);
     else {
-      pendingStateChecks.set(frame, expectedHash);
+      pendingStateChecks.set(frame, { hash: expectedHash, components: expectedComponents });
       for (const pendingFrame of pendingStateChecks.keys()) {
         if (pendingFrame < gameFrame - ROLLBACK_WINDOW_FRAMES) pendingStateChecks.delete(pendingFrame);
       }

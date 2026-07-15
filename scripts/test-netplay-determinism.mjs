@@ -7,6 +7,7 @@ import {
   captureDeterministicState,
   restoreDeterministicState,
   hashDeterministicState,
+  hashDeterministicComponents,
   deterministicStateView,
 } from '../src/netplay/state.js';
 import { decodeInputMask, encodeInputMask, messageButtons } from '../src/netplay/input.js';
@@ -145,6 +146,14 @@ logicVariant.cpu.REG_ACC ^= 1;
 assertNotEqual(hashDeterministicState(logicVariant), hashDeterministicState(hashSource), 'CPU逻辑状态');
 console.log('✓ 状态校验：忽略渲染缓存，但能识别CPU逻辑分叉');
 
+const componentHashes = hashDeterministicComponents(hashSource);
+for (const component of ['cpu', 'mmap', 'ppu', 'papu', 'controllers']) {
+  if (!/^[0-9a-f]{8}$/.test(componentHashes[component])) {
+    throw new Error(`组件校验值无效：${component}`);
+  }
+}
+console.log('✓ 分组状态校验：可定位 CPU/Mapper/PPU/APU/手柄分叉');
+
 const source = createEmulator();
 advance(source, 0, 240);
 const snapshot = captureDeterministicState(source.nes);
@@ -199,6 +208,56 @@ advance(delayed, 248, 320, true);
 assertEqual(stateHash(delayed), stateHash(authoritative), '迟到输入回滚后的状态');
 assertEqual(delayed.getFrameHash(), authoritative.getFrameHash(), '迟到输入回滚后的画面');
 console.log('✓ 迟到输入回滚：重算72帧后与权威时间线一致');
+
+function applyPlayerButtons(nes, player, buttons) {
+  for (const [name, code] of Object.entries(buttonCodes)) {
+    if (buttons.has(name)) nes.buttonDown(player, code);
+    else nes.buttonUp(player, code);
+  }
+}
+
+// Reproduce a rapid mobile-controller session: every edge reaches the host
+// three frames late and forces another restore/replay from an 8-frame snapshot.
+// This catches mutable snapshots and replay-only state drift that a single
+// rollback cannot reveal.
+const repeatedHost = createEmulator(44100);
+advance(repeatedHost, 0, 120, false);
+const repeatedGuest = createEmulator(48000);
+restoreDeterministicState(repeatedGuest.nes, captureDeterministicState(repeatedHost.nes), { preserveLocalAudio: true });
+const rapidEvents = [];
+for (let frame = 140, pressed = true; frame <= 300; frame += 5, pressed = !pressed) {
+  rapidEvents.push({ frame, buttons: new Set(pressed ? ['RIGHT'] : []) });
+}
+const arrivedEvents = [];
+let repeatedSnapshots = [{ frame: 120, state: captureDeterministicState(repeatedHost.nes) }];
+for (let frame = 120; frame < 380; frame++) {
+  for (const event of rapidEvents.filter((candidate) => candidate.frame + 3 === frame)) {
+    arrivedEvents.push(event);
+    const snapshot = [...repeatedSnapshots].reverse().find((candidate) => candidate.frame <= event.frame);
+    repeatedSnapshots = repeatedSnapshots.filter((candidate) => candidate.frame <= snapshot.frame);
+    restoreDeterministicState(repeatedHost.nes, snapshot.state);
+    for (let replayFrame = snapshot.frame; replayFrame < frame; replayFrame++) {
+      if (replayFrame % 8 === 0 && replayFrame !== snapshot.frame) {
+        repeatedSnapshots.push({ frame: replayFrame, state: captureDeterministicState(repeatedHost.nes) });
+      }
+      const input = [...arrivedEvents].reverse().find((candidate) => candidate.frame <= replayFrame);
+      applyPlayerButtons(repeatedHost.nes, 2, input?.buttons || new Set());
+      repeatedHost.nes.frame();
+    }
+  }
+  if (frame % 8 === 0 && !repeatedSnapshots.some((snapshot) => snapshot.frame === frame)) {
+    repeatedSnapshots.push({ frame, state: captureDeterministicState(repeatedHost.nes) });
+  }
+  const hostInput = [...arrivedEvents].reverse().find((candidate) => candidate.frame <= frame);
+  const guestInput = [...rapidEvents].reverse().find((candidate) => candidate.frame <= frame);
+  applyPlayerButtons(repeatedHost.nes, 2, hostInput?.buttons || new Set());
+  applyPlayerButtons(repeatedGuest.nes, 2, guestInput?.buttons || new Set());
+  repeatedHost.nes.frame();
+  repeatedGuest.nes.frame();
+}
+assertEqual(stateHash(repeatedHost), stateHash(repeatedGuest), '连续迟到输入回滚后的状态');
+assertEqual(repeatedHost.getFrameHash(), repeatedGuest.getFrameHash(), '连续迟到输入回滚后的画面');
+console.log('✓ 连续迟到输入回滚：33次快速按键后仍保持一致');
 
 const buttonSet = ['RIGHT', 'A', 'START'];
 const buttonMask = encodeInputMask(buttonSet);
