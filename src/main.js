@@ -160,12 +160,16 @@ function getRuntimeRelayUrl() {
   try {
     const queryValue = new URLSearchParams(window.location.search).get('relay');
     if (queryValue?.trim()) return queryValue.trim();
+    // The deployed private relay is authoritative. Old Quick Tunnel/VPS URLs
+    // stored by earlier builds must not silently override it on one device.
+    const deployedValue = String(import.meta.env.VITE_RELAY_URL || '').trim();
+    if (deployedValue) return deployedValue;
     return localStorage.getItem(RELAY_URL_STORAGE_KEY)?.trim() || '';
   } catch (error) {
     return '';
   }
 }
-const RELAY_SERVER_URL = getRuntimeRelayUrl() || String(import.meta.env.VITE_RELAY_URL || '').trim();
+const RELAY_SERVER_URL = getRuntimeRelayUrl();
 
 let audioCtx = null;
 let scriptNode = null;
@@ -2383,12 +2387,27 @@ function getRelayTicketUrl() {
 }
 
 async function requestRelayTickets(nextRoomId, accessKey) {
-  logNetworkEvent('relay-ticket-request', { room: `${nextRoomId.slice(0, 4)}…${nextRoomId.slice(-4)}`, accessKey: Boolean(accessKey) });
-  const response = await fetch(getRelayTicketUrl(), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ roomId: nextRoomId, accessKey }),
+  const ticketUrl = getRelayTicketUrl();
+  logNetworkEvent('relay-ticket-request', {
+    room: `${nextRoomId.slice(0, 4)}…${nextRoomId.slice(-4)}`,
+    accessKey: Boolean(accessKey),
+    host: ticketUrl.hostname,
   });
+  let response;
+  try {
+    response = await fetch(ticketUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomId: nextRoomId, accessKey }),
+    });
+  } catch (error) {
+    logNetworkEvent('relay-ticket-fetch-error', {
+      host: ticketUrl.hostname,
+      name: error?.name || 'Error',
+      message: error?.message || String(error),
+    });
+    throw new Error(`无法访问私人中继 ${ticketUrl.hostname}，请确认 Tailscale 已开启`);
+  }
   const result = await response.json().catch(() => ({}));
   logNetworkEvent('relay-ticket-response', { status: response.status, ok: response.ok, hostToken: Boolean(result.hostToken), guestToken: Boolean(result.guestToken), error: result.error || '' });
   if (!response.ok || !result.hostToken || !result.guestToken) {
