@@ -1,0 +1,8 @@
+{
+  "name": "pwa-nes-private-relay",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}

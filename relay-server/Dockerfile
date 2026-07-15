@@ -1,7 +1,7 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY relay-server/package.json relay-server/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY relay-server/server.mjs relay-server/cloud-store.mjs ./relay-server/
