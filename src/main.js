@@ -187,6 +187,7 @@ let audioEnabled = false;
 let audioRead = 0;
 let audioWrite = 0;
 let audioCount = 0;
+let audioResampleAccumulator = 0;
 let audioL = null;
 let audioR = null;
 let streamAudioDestination = null;
@@ -2935,6 +2936,7 @@ function clearAudioBuffer() {
   audioRead = 0;
   audioWrite = 0;
   audioCount = 0;
+  audioResampleAccumulator = 0;
 }
 
 function updateSoundButton() {
@@ -2949,7 +2951,7 @@ function updateSoundButton() {
   }
 }
 
-function pushAudioSample(left, right) {
+function writeAudioSample(left, right) {
   if (!audioCtx || !audioL) return;
   // Keep latency bounded after a slow frame or an iOS audio interruption.
   const maxBufferedSamples = Math.ceil(audioCtx.sampleRate * 0.12);
@@ -2965,6 +2967,20 @@ function pushAudioSample(left, right) {
   audioR[audioWrite] = right;
   audioWrite = (audioWrite + 1) % audioL.length;
   audioCount++;
+}
+
+function pushAudioSample(left, right) {
+  if (!audioCtx || !audioL) return;
+  const sourceRate = Math.max(8000, Number(nes?.papu?.sampleRate) || audioCtx.sampleRate);
+  audioResampleAccumulator += audioCtx.sampleRate / sourceRate;
+  // Rates normally differ by only 44.1/48 kHz. The cap prevents a corrupted
+  // snapshot from filling the entire audio ring in one callback.
+  let written = 0;
+  while (audioResampleAccumulator >= 1 && written < 4) {
+    writeAudioSample(left, right);
+    audioResampleAccumulator -= 1;
+    written++;
+  }
 }
 
 function arrayBufferToBinary(buffer) {

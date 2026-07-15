@@ -96,10 +96,11 @@ export function captureDeterministicState(nes) {
 function resetLocalAudioOutput(nes, localAudio) {
   if (!localAudio || !nes.papu) return;
   const papu = nes.papu;
-  papu.sampleRate = localAudio.sampleRate;
-  papu.sampleTimerMax = Math.floor((1024 * 1789772.5) / localAudio.sampleRate);
-  papu.sampleTimer = 0;
-  papu.extraCycles = 0;
+  // Keep the authoritative sample rate, timer and deferred cycles verbatim.
+  // jsnes uses audio sample boundaries to split APU CPU-cycle work. Converting
+  // the timer to the guest AudioContext rate at an arbitrary snapshot frame
+  // eventually changes DMC/channel counters and creates a false desync.
+  // The app resamples the generated speaker output separately.
   papu.sampleCount = 0;
   papu.accCount = 0;
   papu.prevSampleL = 0;

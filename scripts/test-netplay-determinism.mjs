@@ -197,6 +197,31 @@ assertEqual(stateHash(crossRateRestored), stateHash(crossRateSource), '跨采样
 assertEqual(crossRateRestored.getFrameHash(), crossRateSource.getFrameHash(), '跨采样率快照恢复后的画面');
 console.log('✓ 44.1→48 kHz网络快照恢复：继续运行360帧一致');
 
+for (const snapshotFrame of [121, 127, 173, 253, 317]) {
+  const arbitraryRateSource = createEmulator(44100);
+  advance(arbitraryRateSource, 0, snapshotFrame);
+  const arbitraryRateRestored = createEmulator(48000);
+  restoreDeterministicState(
+    arbitraryRateRestored.nes,
+    captureDeterministicState(arbitraryRateSource.nes),
+    { preserveLocalAudio: true },
+  );
+  advance(arbitraryRateSource, snapshotFrame, snapshotFrame + 240);
+  advance(arbitraryRateRestored, snapshotFrame, snapshotFrame + 240);
+  if (stateHash(arbitraryRateRestored) !== stateHash(arbitraryRateSource)) {
+    console.error(firstDifference(
+      deterministicStateView(captureDeterministicState(arbitraryRateRestored.nes)),
+      deterministicStateView(captureDeterministicState(arbitraryRateSource.nes)),
+    ));
+  }
+  assertEqual(
+    stateHash(arbitraryRateRestored),
+    stateHash(arbitraryRateSource),
+    `非整帧音频快照第${snapshotFrame}帧恢复后的状态`,
+  );
+}
+console.log('✓ 非整帧跨采样率快照：5个音频相位均保持一致');
+
 const authoritative = createEmulator();
 advance(authoritative, 0, 320, true);
 const delayed = createEmulator();
