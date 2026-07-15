@@ -7,6 +7,7 @@ import {
   captureDeterministicState,
   restoreDeterministicState,
   hashDeterministicState,
+  deterministicStateView,
 } from '../src/netplay/state.js';
 import { decodeInputMask, encodeInputMask, messageButtons } from '../src/netplay/input.js';
 
@@ -95,6 +96,19 @@ function assertNotEqual(actual, expected, label) {
   if (actual === expected) throw new Error(`${label}未检测出差异：${actual}`);
 }
 
+function firstDifference(left, right, path = 'state') {
+  if (Object.is(left, right)) return '';
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') {
+    return `${path}: ${JSON.stringify(left)} != ${JSON.stringify(right)}`;
+  }
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    const difference = firstDifference(left[key], right[key], `${path}.${key}`);
+    if (difference) return difference;
+  }
+  return '';
+}
+
 const baselineA = createEmulator();
 const baselineB = createEmulator();
 for (let frame = 0; frame < 720; frame++) {
@@ -141,6 +155,23 @@ advance(restored, 240, 600);
 assertEqual(stateHash(restored), stateHash(source), '快照恢复后的状态');
 assertEqual(restored.getFrameHash(), source.getFrameHash(), '快照恢复后的画面');
 console.log('✓ 精简快照恢复：继续运行360帧一致');
+
+const crossRateSource = createEmulator(44100);
+advance(crossRateSource, 0, 240);
+const crossRateSnapshot = captureDeterministicState(crossRateSource.nes);
+const crossRateRestored = createEmulator(48000);
+restoreDeterministicState(crossRateRestored.nes, crossRateSnapshot, { preserveLocalAudio: true });
+advance(crossRateSource, 240, 600);
+advance(crossRateRestored, 240, 600);
+if (stateHash(crossRateRestored) !== stateHash(crossRateSource)) {
+  console.error(firstDifference(
+    deterministicStateView(captureDeterministicState(crossRateRestored.nes)),
+    deterministicStateView(captureDeterministicState(crossRateSource.nes)),
+  ));
+}
+assertEqual(stateHash(crossRateRestored), stateHash(crossRateSource), '跨采样率快照恢复后的状态');
+assertEqual(crossRateRestored.getFrameHash(), crossRateSource.getFrameHash(), '跨采样率快照恢复后的画面');
+console.log('✓ 44.1→48 kHz网络快照恢复：继续运行360帧一致');
 
 const authoritative = createEmulator();
 advance(authoritative, 0, 320, true);

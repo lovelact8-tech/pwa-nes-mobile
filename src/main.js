@@ -86,6 +86,9 @@ let relayPendingRomName = '';
 let relayPendingRomEncoding = '';
 let relayPendingState = null;
 let relayGuestTicket = '';
+let relaySessionTicket = '';
+let relayReconnectTimer = 0;
+let relayReconnectAttempts = 0;
 let relayTurnConfig = null;
 let relayDataQueue = Promise.resolve();
 let hybridRoom = false;
@@ -131,6 +134,7 @@ let networkRttJitterMs = 0;
 let networkPingId = '';
 let networkPingSentAt = 0;
 let lastNetworkPingAt = 0;
+let networkPingTimeoutCount = 0;
 let lastGuestCatchUpLogAt = 0;
 let lastLateInputResyncAt = 0;
 let streamPeerConnection = null;
@@ -1856,6 +1860,7 @@ function teardownPeerConnection(finalStatus = '') {
   networkPingId = '';
   networkPingSentAt = 0;
   lastNetworkPingAt = 0;
+  networkPingTimeoutCount = 0;
   lastGuestCatchUpLogAt = 0;
   lastLateInputResyncAt = 0;
   performanceHudLastAt = 0;
@@ -1867,7 +1872,7 @@ function teardownPeerConnection(finalStatus = '') {
   updateNetworkButtons();
 }
 
-function teardownPeer() {
+function teardownPeer({ preserveRelaySession = false } = {}) {
   clearTimeout(hybridFallbackTimer);
   hybridFallbackTimer = 0;
   hybridFallbackStarted = false;
@@ -1887,6 +1892,12 @@ function teardownPeer() {
   relayPendingState = null;
   relayTurnConfig = null;
   relayGuestTicket = '';
+  if (!preserveRelaySession) {
+    clearTimeout(relayReconnectTimer);
+    relayReconnectTimer = 0;
+    relaySessionTicket = '';
+    relayReconnectAttempts = 0;
+  }
   relayDataQueue = Promise.resolve();
   networkPlayMode = 'rollback';
 }
@@ -1899,6 +1910,25 @@ function closeRelaySocketSilently() {
   socket.onclose = null;
   socket.onerror = null;
   socket.close();
+}
+
+function reconnectRelayGuest(reason = 'connection-lost') {
+  if (networkRole !== 'guest' || networkTransport !== 'relay' || !roomId || !relaySessionTicket) return false;
+  if (relayReconnectTimer || relayReconnectAttempts >= 3) {
+    if (relayReconnectAttempts >= 3) setNetworkText('自动重连失败，请重新打开邀请链接');
+    return false;
+  }
+  const reconnectRoom = roomId;
+  const reconnectTicket = relaySessionTicket;
+  const attempt = ++relayReconnectAttempts;
+  logNetworkEvent('relay-reconnect-scheduled', { reason, attempt });
+  closeRelaySocketSilently();
+  teardownPeerConnection(`连接中断，正在自动重连（${attempt}/3）...`);
+  relayReconnectTimer = window.setTimeout(() => {
+    relayReconnectTimer = 0;
+    connectRelay('guest', reconnectRoom, reconnectTicket, '', { reconnect: true, attempt });
+  }, Math.min(1800, 300 * attempt));
+  return true;
 }
 
 function cancelPendingDirectConnection() {
@@ -2432,6 +2462,8 @@ function handleRelayControl(message) {
     refreshInviteLink();
     updateNetworkButtons();
     if (message.peerConnected) {
+      relayReconnectAttempts = 0;
+      networkPingTimeoutCount = 0;
       cancelPendingDirectConnection();
       markNetworkConnected();
     }
@@ -2451,6 +2483,7 @@ function handleRelayControl(message) {
 }
 
 async function handleRelayData(data) {
+  networkPingTimeoutCount = 0;
   if (data instanceof Blob) {
     logNetworkEvent('relay-binary-blob', { bytes: data.size });
     data = await data.arrayBuffer();
@@ -2518,7 +2551,7 @@ async function handleRelayData(data) {
   }
 }
 
-function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
+function connectRelay(role, nextRoomId, ticket, guestTicket = '', { reconnect = false, attempt = 0 } = {}) {
   let socketUrl;
   try {
     socketUrl = normalizeRelayUrl(RELAY_SERVER_URL);
@@ -2531,20 +2564,27 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
     setNetworkText('邀请票据无效，请让 1P 重新创建跨网房间');
     return;
   }
-  teardownPeer();
+  teardownPeer({ preserveRelaySession: reconnect });
   networkTransport = 'relay';
   networkPlayMode = getPreferredNetworkPlayMode();
   if (netModeSelect) netModeSelect.value = networkPlayMode;
   networkRole = role;
   roomId = String(nextRoomId || '').trim() || generateRoomId();
   relayGuestTicket = guestTicket;
+  relaySessionTicket = ticket;
   localStorage.removeItem(NETWORK_STORAGE_KEY);
   localPlayer = role === 'host' ? 1 : 2;
   remotePlayer = role === 'host' ? 2 : 1;
   socketUrl.searchParams.set('room', roomId);
   socketUrl.searchParams.set('role', role);
   socketUrl.searchParams.set('ticket', ticket);
-  logNetworkEvent('relay-connect-start', { role, room: `${roomId.slice(0, 4)}…${roomId.slice(-4)}`, ticket: Boolean(ticket), host: socketUrl.host });
+  logNetworkEvent(reconnect ? 'relay-reconnect-start' : 'relay-connect-start', {
+    role,
+    room: `${roomId.slice(0, 4)}…${roomId.slice(-4)}`,
+    ticket: Boolean(ticket),
+    host: socketUrl.host,
+    ...(reconnect ? { attempt } : {}),
+  });
   relaySocket = new WebSocket(socketUrl);
   relaySocket.binaryType = 'arraybuffer';
   setNetworkText(role === 'host' ? '正在创建跨网房间...' : '正在加入跨网房间...');
@@ -2566,6 +2606,7 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   relaySocket.onclose = (event) => {
     logNetworkEvent('relay-websocket-close', { role, code: event.code, reason: event.reason || '', clean: event.wasClean });
     relayReady = false;
+    if (role === 'guest' && event.code !== 4008 && reconnectRelayGuest(`close-${event.code}`)) return;
     const reason = event.reason ? `：${event.reason}` : '';
     teardownPeerConnection(`公网中继已断开${reason}`);
   };
@@ -3066,6 +3107,8 @@ function networkHeartbeatTick() {
   if (networkPingId && now - networkPingSentAt > NETWORK_PING_TIMEOUT_MS) {
     logNetworkEvent('network-ping-timeout');
     networkPingId = '';
+    networkPingTimeoutCount++;
+    if (networkPingTimeoutCount >= 3 && reconnectRelayGuest('ping-timeout')) return;
   }
   const pingInterval = networkRttMs ? NETWORK_PING_IDLE_MS : NETWORK_PING_BOOTSTRAP_MS;
   if (networkPingId || now - lastNetworkPingAt < pingInterval) return;

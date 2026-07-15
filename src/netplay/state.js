@@ -55,6 +55,15 @@ function withoutKeys(value = {}, omittedKeys) {
   return Object.fromEntries(Object.entries(value).filter(([key]) => !omittedKeys.has(key)));
 }
 
+function deterministicPapuView(papu = {}) {
+  const view = withoutKeys(papu, PAPU_OUTPUT_KEYS);
+  // Noise integrates its instantaneous output between host audio samples.
+  // Sampling phase is device-local, while the shift register, timer, length,
+  // and envelope fields remain deterministic and are still verified.
+  if (view.noise) view.noise = withoutKeys(view.noise, new Set(['accValue', 'accCount']));
+  return view;
+}
+
 export function captureDeterministicState(nes) {
   const ppu = nes.ppu;
   const omitted = {
@@ -87,6 +96,10 @@ function resetLocalAudioOutput(nes, localAudio) {
   papu.prevSampleR = 0;
   papu.smpAccumL = 0;
   papu.smpAccumR = 0;
+  if (papu.noise) {
+    papu.noise.accValue = papu.noise.sampleValue || 0;
+    papu.noise.accCount = 1;
+  }
   papu.masterVolume = localAudio.masterVolume;
   papu.setPanning(localAudio.panning);
   papu.setMasterVolume(localAudio.masterVolume);
@@ -132,7 +145,7 @@ export function deterministicStateView(state) {
     ppu: withoutKeys(state.ppu, RENDER_ONLY_PPU_KEYS),
     // APU frame IRQ and DMC IRQ state can affect CPU execution, so channel and
     // IRQ state stays in the hash. Device-only audio sampling fields do not.
-    papu: withoutKeys(state.papu, PAPU_OUTPUT_KEYS),
+    papu: deterministicPapuView(state.papu),
     controllers: state.controllers,
   };
 }
