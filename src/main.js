@@ -5,6 +5,8 @@ import { gzipSync, gunzipSync, strFromU8, strToU8, unzipSync } from 'fflate';
 import { ui } from './ui/dom.js';
 import { hydrateIcons } from './ui/icons.js';
 import { createDialogController } from './ui/dialogs.js';
+import { captureDeterministicState, restoreDeterministicState, hashDeterministicState } from './netplay/state.js';
+import { inputPayload, messageButtons } from './netplay/input.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
@@ -1208,16 +1210,7 @@ function encodeNetworkState(state) {
 }
 
 function decodeNetworkState(value) {
-  const state = JSON.parse(strFromU8(gunzipSync(base64ToBytes(value))));
-  if (!nes?.ppu || !state?.ppu) return state;
-  const mirroring = Number(state.ppu.currentMirroring);
-  nes.ppu.currentMirroring = -1;
-  nes.ppu.setMirroring(mirroring);
-  state.ppu.vramMirrorTable = nes.ppu.vramMirrorTable;
-  state.ppu.buffer = nes.ppu.buffer;
-  state.ppu.bgbuffer = nes.ppu.bgbuffer;
-  state.ppu.pixrendered = nes.ppu.pixrendered;
-  return state;
+  return JSON.parse(strFromU8(gunzipSync(base64ToBytes(value))));
 }
 
 function sendTransportMessage(message) {
@@ -1300,19 +1293,23 @@ function sendPeerButtons(player, buttons) {
     const order = ++authoritativeInputOrder;
     logNetworkEvent('input-send', { role: 'host', player, buttons: nextButtons, frame, delayFrames, id });
     scheduleNetworkInput(player, nextButtons, frame, { id, order });
-    sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame, id, order });
+    sendPeerMessage({ type: 'input', player, ...inputPayload(nextButtons), frame, id, order });
     return;
   }
-  // Schedule 2P against the host's clock, not the deliberately buffered guest
-  // clock. Sending gameFrame + 1 made every normal 2P event late at the host,
-  // forcing an expensive rollback for every press/release pair.
+  // A healthy Tailscale/direct route uses real rollback: apply 2P locally on
+  // the next frame and let the host rewind the one or two frames spent in
+  // transit. This removes artificial 2P input delay. Slower routes retain a
+  // future-frame buffer so a single input cannot trigger a huge replay.
   const estimatedHostFrame = getEstimatedHostFrame();
   const transitFrames = networkRttMs > 0 ? Math.ceil((networkRttMs / 2) / FRAME_MS) : 1;
   const leadFrames = Math.max(
     GUEST_INPUT_MIN_LEAD_FRAMES,
     Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames + guestInputSafetyFrames),
   );
-  const frame = Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
+  const lowLatencyRollback = networkRttMs > 0 && networkRttMs <= 120 && networkRttJitterMs <= 35;
+  const frame = lowLatencyRollback
+    ? gameFrame + 1
+    : Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
   const order = ++networkEventOrder;
   // While the host clock is unavailable, retain immediate touch feedback but
   // do not advance a speculative game timeline. The host still receives the
@@ -1326,10 +1323,18 @@ function sendPeerButtons(player, buttons) {
     localFrame: gameFrame,
     estimatedHostFrame: Math.round(estimatedHostFrame),
     leadFrames,
+    mode: lowLatencyRollback ? 'rollback' : 'buffered',
     id,
     predicted: !networkTransportStalled,
   });
-  sendPeerMessage({ type: 'input-request', player, buttons: nextButtons, frame, id });
+  sendPeerMessage({
+    type: 'input-request',
+    player,
+    ...inputPayload(nextButtons),
+    frame,
+    id,
+    lowLatencyRollback,
+  });
 }
 
 function getNetworkInputDelayFrames() {
@@ -1452,35 +1457,7 @@ function resetRollbackState({ capture = false, preserveInputsFromFrame = null } 
 }
 
 function hashRollbackState(state) {
-  // PAPU and PPU rendering caches can legitimately differ after a silent
-  // rollback replay. They do not affect CPU-visible NES hardware state, and
-  // hashing them caused false desync recovery jumps even when the game logic
-  // was still identical.
-  const {
-    buffer,
-    bgbuffer,
-    pixrendered,
-    vramMirrorTable,
-    attrib,
-    scantile,
-    curNt,
-    lastRenderedScanline,
-    validTileData,
-    scanlineAlreadyRendered,
-    ...hardwarePpu
-  } = state.ppu || {};
-  const text = JSON.stringify({
-    cpu: state.cpu,
-    mmap: state.mmap,
-    ppu: hardwarePpu,
-    controllers: state.controllers,
-  });
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index++) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  return hashDeterministicState(state);
 }
 
 function compareRollbackStateCheck(snapshot, expectedHash) {
@@ -1523,51 +1500,11 @@ function processRollbackStateCheck(snapshot) {
 }
 
 function captureRollbackState() {
-  const ppu = nes.ppu;
-  // Frame buffers and the mirroring lookup table are render-only/derived
-  // data. Serializing them accounts for most of jsnes' snapshot cost and
-  // blocks Safari's main thread during rapid remote input.
-  const omitted = {
-    buffer: ppu.buffer,
-    bgbuffer: ppu.bgbuffer,
-    pixrendered: ppu.pixrendered,
-    vramMirrorTable: ppu.vramMirrorTable,
-  };
-  ppu.buffer = [];
-  ppu.bgbuffer = [];
-  ppu.pixrendered = [];
-  ppu.vramMirrorTable = [];
-  try {
-    return nes.toJSON();
-  } finally {
-    Object.assign(ppu, omitted);
-  }
+  return captureDeterministicState(nes);
 }
 
 function restoreRollbackState(state) {
-  const ppuState = state.ppu;
-  if (!ppuState) {
-    nes.fromJSON(state);
-    return;
-  }
-  const omitted = {
-    buffer: ppuState.buffer,
-    bgbuffer: ppuState.bgbuffer,
-    pixrendered: ppuState.pixrendered,
-    vramMirrorTable: ppuState.vramMirrorTable,
-  };
-  ppuState.buffer = nes.ppu.buffer;
-  ppuState.bgbuffer = nes.ppu.bgbuffer;
-  ppuState.pixrendered = nes.ppu.pixrendered;
-  nes.ppu.currentMirroring = -1;
-  nes.ppu.setMirroring(Number(ppuState.currentMirroring));
-  ppuState.vramMirrorTable = nes.ppu.vramMirrorTable;
-  try {
-    nes.fromJSON(state);
-  } finally {
-    // Keep snapshots immutable: live render arrays change every frame.
-    Object.assign(ppuState, omitted);
-  }
+  restoreDeterministicState(nes, state);
 }
 
 function captureRollbackSnapshot(force = false) {
@@ -1737,7 +1674,7 @@ function applyScheduledNetworkInputs() {
 function sendPeerSnapshot(syncId = '') {
   if (networkRole !== 'host' || !nes || !peerConnected) return;
   try {
-    const encodedState = encodeNetworkState(nes.toJSON());
+    const encodedState = encodeNetworkState(captureDeterministicState(nes));
     logNetworkEvent('state-send', { syncId: syncId || 'none', base64Bytes: encodedState.length, frame: gameFrame });
     sendPeerMessage({
       type: 'state-gzip',
@@ -2054,6 +1991,7 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input-request' && networkRole === 'host' && message.player === remotePlayer) {
+    const buttons = messageButtons(message);
     const delayFrames = getNetworkInputDelayFrames();
     const requestedFrame = Math.max(0, Math.floor(Number(message.frame) || gameFrame));
     const oldestRollbackFrame = rollbackSnapshots[0]?.frame ?? gameFrame;
@@ -2062,10 +2000,10 @@ function handleNetworkMessage(message) {
       : gameFrame + delayFrames;
     const id = String(message.id || `g-legacy-${++networkEventOrder}`);
     const order = ++authoritativeInputOrder;
-    const scheduled = scheduleNetworkInput(message.player, message.buttons, frame, { id, order, deferRollback: true });
+    const scheduled = scheduleNetworkInput(message.player, buttons, frame, { id, order, deferRollback: true });
     logNetworkEvent('input-request-received', {
       player: message.player,
-      buttons: message.buttons || [],
+      buttons,
       requestedFrame,
       frame,
       id,
@@ -2076,11 +2014,12 @@ function handleNetworkMessage(message) {
     sendPeerMessage({
       type: 'input',
       player: message.player,
-      buttons: message.buttons,
+      ...inputPayload(buttons),
       frame,
       id,
       order,
       hostLate: scheduled.late,
+      lowLatencyRollback: Boolean(message.lowLatencyRollback),
     });
     return;
   }
@@ -2136,9 +2075,10 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
+    const buttons = messageButtons(message);
     if (message.player === 2 && String(message.id || '').startsWith('g-')) {
       const now = performance.now();
-      if (message.hostLate) {
+      if (message.hostLate && !message.lowLatencyRollback) {
         const previousSafetyFrames = guestInputSafetyFrames;
         guestInputSafetyFrames = Math.min(GUEST_INPUT_MAX_SAFETY_FRAMES, guestInputSafetyFrames + 1);
         guestLastLateInputAt = now;
@@ -2156,14 +2096,14 @@ function handleNetworkMessage(message) {
         logNetworkEvent('guest-input-safety-decreased', { safetyFrames: guestInputSafetyFrames });
       }
     }
-    const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame, {
+    const scheduled = scheduleNetworkInput(message.player, buttons, message.frame, {
       id: message.id,
       order: message.order,
       deferRollback: true,
     });
     logNetworkEvent('input-received', {
       player: message.player,
-      buttons: message.buttons || [],
+      buttons,
       frame: message.frame,
       localFrame: gameFrame,
       targetFrame: scheduled.targetFrame,
@@ -2214,7 +2154,7 @@ function handleNetworkMessage(message) {
     try {
       logNetworkEvent('state-received', { syncId: message.syncId || 'none', base64Bytes: String(message.data || '').length, frame: message.frame });
       suppressNetworkBroadcast = true;
-      nes.fromJSON(decodeNetworkState(message.data));
+      restoreDeterministicState(nes, decodeNetworkState(message.data), { preserveLocalAudio: true });
       gameFrame = Number(message.frame) || 0;
       syncButtonSetsFromNes();
       resetRollbackState({ capture: true, preserveInputsFromFrame: gameFrame });
