@@ -323,9 +323,18 @@ relay.on('connection', (socket) => {
     socket.close(1013, '服务器房间已满');
     return;
   }
-  if (room[role]?.readyState === WebSocket.OPEN) {
-    socket.close(4009, role === 'host' ? '1P 已存在' : '2P 已存在');
-    return;
+  const existingSocket = room[role];
+  if (existingSocket?.readyState === WebSocket.OPEN) {
+    if (role === 'host') {
+      socket.close(4009, '1P 已存在');
+      return;
+    }
+    // Mobile browsers do not always send a WebSocket close frame when the PWA
+    // is swiped away. A valid guest ticket should therefore be able to replace
+    // the stale 2P immediately instead of waiting for two heartbeat intervals.
+    room.guest = null;
+    existingSocket.close(4008, '2P 已在新页面重新连接');
+    if (room.host?.readyState === WebSocket.OPEN) sendControl(room.host, 'peer-left');
   }
   room[role] = socket;
   room.touchedAt = Date.now();

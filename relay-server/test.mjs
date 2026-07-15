@@ -132,8 +132,20 @@ const romPromise = waitForMessage(guest, (data, binary) => binary && data.equals
 host.send(rom);
 assert.deepEqual(await romPromise, rom);
 
+const staleGuestClosed = new Promise((resolve) => guest.once('close', (code) => resolve(code)));
+const hostSawGuestLeave = waitForMessage(host, (data, binary) => !binary && JSON.parse(data).__relay === 'peer-left');
+const hostSawGuestRejoin = waitForMessage(host, (data, binary) => !binary && JSON.parse(data).__relay === 'peer-connected');
+const replacementGuestClient = await openClient('guest', tickets.guestToken);
+const replacementGuest = replacementGuestClient.socket;
+assert.equal(await staleGuestClosed, 4008);
+await hostSawGuestLeave;
+await hostSawGuestRejoin;
+const replacementInput = waitForMessage(replacementGuest, (data, binary) => !binary && JSON.parse(data).type === 'input');
+host.send(JSON.stringify({ type: 'input', player: 1, buttons: ['B'], frame: 84 }));
+assert.equal(JSON.parse(await replacementInput).frame, 84);
+
 host.close();
-guest.close();
+replacementGuest.close();
 server.kill('SIGTERM');
 fs.rmSync(cloudDataDir, { recursive: true, force: true });
-console.log('Relay TURN credentials, text, and binary forwarding passed');
+console.log('Relay TURN credentials, forwarding, and instant guest replacement passed');

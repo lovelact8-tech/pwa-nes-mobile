@@ -12,8 +12,8 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // One authoritative frame gives the host time to preserve short down/up input
 // transitions before both peers execute them on the same emulation frame.
 const NET_INPUT_DELAY_FRAMES = 1;
-const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
-const GUEST_INPUT_MAX_LEAD_FRAMES = 3;
+const GUEST_INPUT_MIN_LEAD_FRAMES = 1;
+const GUEST_INPUT_MAX_LEAD_FRAMES = 2;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
@@ -22,7 +22,7 @@ const NETWORK_SYNC_TIMEOUT_MS = 30000;
 const DEFAULT_NETWORK_RTT_MS = 250;
 const RELAY_MIN_JITTER_BUFFER_MS = 8;
 const RELAY_MAX_JITTER_BUFFER_MS = 50;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 2;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 1;
 // A large playback lead hides jitter but makes 2P feel like a delayed video.
 // Rollback absorbs short spikes, so keep the normal Tailscale path responsive.
 const RELAY_MAX_GUEST_BUFFER_FRAMES = 4;
@@ -1436,7 +1436,9 @@ function getRelayGuestBufferFrames(rttMs = networkRttMs) {
   const rtt = rttMs > 0 ? rttMs : DEFAULT_NETWORK_RTT_MS;
   return Math.max(
     RELAY_MIN_GUEST_BUFFER_FRAMES,
-    Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + getRelayJitterBufferMs()) / FRAME_MS)),
+    // Rollback covers a one-frame miss, so do not turn a healthy 30–40ms
+    // Tailscale route into two artificial playback frames plus input lead.
+    Math.min(RELAY_MAX_GUEST_BUFFER_FRAMES, Math.ceil((rtt / 2 + getRelayJitterBufferMs()) / FRAME_MS) - 1),
   );
 }
 
