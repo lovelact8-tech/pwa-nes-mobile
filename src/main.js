@@ -17,6 +17,7 @@ import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
   GUEST_INPUT_MAX_LEAD_FRAMES, GUEST_INPUT_MAX_SAFETY_FRAMES, GUEST_INPUT_SAFETY_DECAY_MS,
   NET_CLOCK_INTERVAL_MS, NETWORK_PING_IDLE_MS, NETWORK_PING_BOOTSTRAP_MS, NETWORK_PING_TIMEOUT_MS,
+  NETWORK_BOOTSTRAP_PING_TIMEOUT_MS,
   NETWORK_SYNC_TIMEOUT_MS, DEFAULT_NETWORK_RTT_MS,
   RELAY_MIN_JITTER_BUFFER_MS, RELAY_MAX_JITTER_BUFFER_MS, RELAY_MIN_GUEST_BUFFER_FRAMES,
   RELAY_MAX_GUEST_BUFFER_FRAMES, HOST_CLOCK_STALE_MS, GUEST_FAST_CATCHUP_THRESHOLD_FRAMES,
@@ -1983,6 +1984,12 @@ function markNetworkConnected() {
     });
   } else if (networkRole === 'host' && lastRomData && !peerRomSent) {
     sendCurrentRomToPeer();
+  } else if (networkRole === 'guest') {
+    // Do not rely solely on the host's peer-connected notification. Mobile
+    // WebSockets can finish opening after a stale guest has just been
+    // replaced, leaving the new page connected but waiting forever for ROM.
+    logNetworkEvent('rom-request-sent');
+    sendPeerMessage({ type: 'rom-request' });
   }
 }
 
@@ -2199,6 +2206,11 @@ function handleNetworkMessage(message) {
   if (message.type === 'rom-fallback-request' && networkRole === 'host') {
     logNetworkEvent('relay-rom-fallback-requested');
     sendCurrentRomToPeer({ forceBinary: true });
+    return;
+  }
+  if (message.type === 'rom-request' && networkRole === 'host') {
+    logNetworkEvent('rom-request-received', { alreadySent: peerRomSent, hasRom: Boolean(lastRomData) });
+    if (!peerRomSent) sendCurrentRomToPeer();
     return;
   }
   if (message.type === 'rom' && networkRole === 'guest') {
@@ -3129,11 +3141,17 @@ function networkHeartbeatTick() {
     return;
   }
   if (networkRole !== 'guest') return;
-  if (networkPingId && now - networkPingSentAt > NETWORK_PING_TIMEOUT_MS) {
+  const pingTimeoutMs = hostClockFrame === null
+    ? NETWORK_BOOTSTRAP_PING_TIMEOUT_MS
+    : NETWORK_PING_TIMEOUT_MS;
+  if (networkPingId && now - networkPingSentAt > pingTimeoutMs) {
     logNetworkEvent('network-ping-timeout');
     networkPingId = '';
     networkPingTimeoutCount++;
-    if ((networkTransportStalled || networkPingTimeoutCount >= 3) && reconnectRelayGuest('ping-timeout')) return;
+    // With no clock sample at all, the apparent connection is half-open: a
+    // healthy relay always answers ping even while ROM/state data is loading.
+    if ((hostClockFrame === null || networkTransportStalled || networkPingTimeoutCount >= 3)
+      && reconnectRelayGuest('ping-timeout')) return;
   }
   const pingInterval = networkRttMs ? NETWORK_PING_IDLE_MS : NETWORK_PING_BOOTSTRAP_MS;
   if (networkPingId || now - lastNetworkPingAt < pingInterval) return;
