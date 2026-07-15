@@ -3,6 +3,15 @@ const RENDER_ONLY_PPU_KEYS = new Set([
   'bgbuffer',
   'pixrendered',
   'vramMirrorTable',
+  // jsnes rebuilds these scanline/tile caches while drawing. Silent rollback
+  // deliberately skips drawing, so they can differ without changing any
+  // CPU-visible PPU register, VRAM, sprite RAM, or future game result.
+  'attrib',
+  'scantile',
+  'curNt',
+  'lastRenderedScanline',
+  'validTileData',
+  'scanlineAlreadyRendered',
 ]);
 
 // These fields only control conversion from the deterministic APU channels to

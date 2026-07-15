@@ -91,6 +91,10 @@ function assertEqual(actual, expected, label) {
   if (actual !== expected) throw new Error(`${label}不一致：${actual} != ${expected}`);
 }
 
+function assertNotEqual(actual, expected, label) {
+  if (actual === expected) throw new Error(`${label}未检测出差异：${actual}`);
+}
+
 const baselineA = createEmulator();
 const baselineB = createEmulator();
 for (let frame = 0; frame < 720; frame++) {
@@ -112,6 +116,20 @@ advance(sampleRateB, 0, 720);
 assertEqual(stateHash(sampleRateA), stateHash(sampleRateB), '跨设备采样率的逻辑状态');
 assertEqual(sampleRateA.getFrameHash(), sampleRateB.getFrameHash(), '跨设备采样率的画面');
 console.log('✓ 44.1/48 kHz设备：逻辑状态与画面一致');
+
+const hashSource = captureDeterministicState(sampleRateA.nes);
+const renderCacheVariant = structuredClone(hashSource);
+renderCacheVariant.ppu.attrib = Array.from({ length: 32 }, (_, index) => index * 7);
+renderCacheVariant.ppu.scantile = Array.from({ length: 32 }, (_, index) => index * 11);
+renderCacheVariant.ppu.curNt = 3;
+renderCacheVariant.ppu.lastRenderedScanline = 117;
+renderCacheVariant.ppu.validTileData = !renderCacheVariant.ppu.validTileData;
+renderCacheVariant.ppu.scanlineAlreadyRendered = !renderCacheVariant.ppu.scanlineAlreadyRendered;
+assertEqual(hashDeterministicState(renderCacheVariant), hashDeterministicState(hashSource), 'PPU渲染缓存');
+const logicVariant = structuredClone(hashSource);
+logicVariant.cpu.REG_ACC ^= 1;
+assertNotEqual(hashDeterministicState(logicVariant), hashDeterministicState(hashSource), 'CPU逻辑状态');
+console.log('✓ 状态校验：忽略渲染缓存，但能识别CPU逻辑分叉');
 
 const source = createEmulator();
 advance(source, 0, 240);
