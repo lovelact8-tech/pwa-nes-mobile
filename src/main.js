@@ -13,7 +13,9 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // transitions before both peers execute them on the same emulation frame.
 const NET_INPUT_DELAY_FRAMES = 1;
 const GUEST_INPUT_MIN_LEAD_FRAMES = 1;
-const GUEST_INPUT_MAX_LEAD_FRAMES = 2;
+const GUEST_INPUT_MAX_LEAD_FRAMES = 4;
+const GUEST_INPUT_MAX_SAFETY_FRAMES = 2;
+const GUEST_INPUT_SAFETY_DECAY_MS = 15000;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
@@ -176,6 +178,8 @@ let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
 let networkTransportStalled = false;
+let guestInputSafetyFrames = 0;
+let guestLastLateInputAt = 0;
 let lastStateRequestAt = 0;
 let networkSyncPaused = false;
 let networkSyncId = '';
@@ -708,6 +712,7 @@ function getNetworkDiagnosticLog() {
     `hostFrame=${hostClockFrame ?? 'none'}`,
     `hostClockAgeMs=${hostClockReceivedAt ? Math.round(performance.now() - hostClockReceivedAt) : 'none'}`,
     `transportStalled=${networkTransportStalled}`,
+    `inputSafetyFrames=${guestInputSafetyFrames}`,
     `userAgent=${navigator.userAgent}`,
     '',
     ...networkLogEntries,
@@ -1351,7 +1356,10 @@ function sendPeerButtons(player, buttons) {
   // forcing an expensive rollback for every press/release pair.
   const estimatedHostFrame = getEstimatedHostFrame();
   const transitFrames = networkRttMs > 0 ? Math.ceil((networkRttMs / 2) / FRAME_MS) : 1;
-  const leadFrames = Math.max(GUEST_INPUT_MIN_LEAD_FRAMES, Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames));
+  const leadFrames = Math.max(
+    GUEST_INPUT_MIN_LEAD_FRAMES,
+    Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames + guestInputSafetyFrames),
+  );
   const frame = Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
   const order = ++networkEventOrder;
   // While the host clock is unavailable, retain immediate touch feedback but
@@ -1475,12 +1483,27 @@ function resetRollbackState({ capture = false, preserveInputsFromFrame = null } 
 }
 
 function hashRollbackState(state) {
-  // PAPU contains output-sample-rate details that can legitimately differ
-  // between devices. CPU, mapper, PPU and controllers determine game state.
+  // PAPU and PPU rendering caches can legitimately differ after a silent
+  // rollback replay. They do not affect CPU-visible NES hardware state, and
+  // hashing them caused false desync recovery jumps even when the game logic
+  // was still identical.
+  const {
+    buffer,
+    bgbuffer,
+    pixrendered,
+    vramMirrorTable,
+    attrib,
+    scantile,
+    curNt,
+    lastRenderedScanline,
+    validTileData,
+    scanlineAlreadyRendered,
+    ...hardwarePpu
+  } = state.ppu || {};
   const text = JSON.stringify({
     cpu: state.cpu,
     mmap: state.mmap,
-    ppu: state.ppu,
+    ppu: hardwarePpu,
     controllers: state.controllers,
   });
   let hash = 2166136261;
@@ -1913,6 +1936,8 @@ function teardownPeerConnection(finalStatus = '') {
   hostClockFrame = null;
   hostClockReceivedAt = 0;
   networkTransportStalled = false;
+  guestInputSafetyFrames = 0;
+  guestLastLateInputAt = 0;
   lastStateRequestAt = 0;
   clearNetworkSync();
   lastNetworkClockAt = 0;
@@ -2079,7 +2104,15 @@ function handleNetworkMessage(message) {
       rollbackQueued: scheduled.rollbackQueued,
       correctedFrame: frame !== requestedFrame,
     });
-    sendPeerMessage({ type: 'input', player: message.player, buttons: message.buttons, frame, id, order });
+    sendPeerMessage({
+      type: 'input',
+      player: message.player,
+      buttons: message.buttons,
+      frame,
+      id,
+      order,
+      hostLate: scheduled.late,
+    });
     return;
   }
   if (message.type === 'state-request' && networkRole === 'host') {
@@ -2134,6 +2167,26 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'input' && networkRole === 'guest') {
+    if (message.player === 2 && String(message.id || '').startsWith('g-')) {
+      const now = performance.now();
+      if (message.hostLate) {
+        const previousSafetyFrames = guestInputSafetyFrames;
+        guestInputSafetyFrames = Math.min(GUEST_INPUT_MAX_SAFETY_FRAMES, guestInputSafetyFrames + 1);
+        guestLastLateInputAt = now;
+        if (guestInputSafetyFrames !== previousSafetyFrames) {
+          logNetworkEvent('guest-input-safety-increased', {
+            safetyFrames: guestInputSafetyFrames,
+            rttMs: Math.round(networkRttMs),
+          });
+        }
+      } else if (guestInputSafetyFrames > 0
+        && guestLastLateInputAt
+        && now - guestLastLateInputAt >= GUEST_INPUT_SAFETY_DECAY_MS) {
+        guestInputSafetyFrames--;
+        guestLastLateInputAt = now;
+        logNetworkEvent('guest-input-safety-decreased', { safetyFrames: guestInputSafetyFrames });
+      }
+    }
     const scheduled = scheduleNetworkInput(message.player, message.buttons, message.frame, {
       id: message.id,
       order: message.order,
@@ -3048,6 +3101,8 @@ function startRom(romData, name = 'NES 游戏') {
     hostClockFrame = null;
     hostClockReceivedAt = 0;
     networkTransportStalled = false;
+    guestInputSafetyFrames = 0;
+    guestLastLateInputAt = 0;
     lastStateRequestAt = 0;
     for (const player of [1, 2]) {
       for (const buttonName of buttonStateByPlayer[player]) {
