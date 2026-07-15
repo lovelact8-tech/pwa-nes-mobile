@@ -40,6 +40,11 @@ body.browser-mode .game { padding-bottom: calc(env(safe-area-inset-bottom) + 78p
 #screen { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges; background: #000; }
 .remoteStream { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 2; }
 .remoteStream.hidden { display: none; }
+.netPerformanceHud { position: absolute; left: 8px; top: 8px; z-index: 7; max-width: calc(100% - 64px); padding: 5px 7px; border: 1px solid rgba(147,197,253,.24); border-radius: 8px; background: rgba(2,6,23,.72); color: #dbeafe; font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.02em; pointer-events: none; backdrop-filter: blur(5px); }
+.netPerformanceHud.hidden { display: none; }
+.netPerformanceHud.good { color: #bbf7d0; border-color: rgba(74,222,128,.28); }
+.netPerformanceHud.warn { color: #fde68a; border-color: rgba(250,204,21,.30); }
+.netPerformanceHud.bad { color: #fecaca; border-color: rgba(248,113,113,.34); }
 .fullscreenBtn { position: absolute; right: 10px; bottom: 10px; z-index: 8; width: 42px; height: 42px; min-height: 42px; padding: 0; border-radius: 999px; background: rgba(15,23,42,.78); border: 1px solid rgba(255,255,255,.20); color: #fff; font-size: 22px; line-height: 1; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 .fullscreenBtn:active { filter: brightness(1.35); }
 .game:fullscreen, body.fullscreen-mode .game { width: 100vw; height: 100dvh; padding: calc(env(safe-area-inset-top) + 6px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px); background: #05070d; }
@@ -112,6 +117,8 @@ dialog button { width: 100%; background: rgba(255,255,255,.13); margin: 5px 0; }
 .relayAccessRow { margin: 8px 0 3px; text-align: left; }
 .relayAccessRow label { display: block; margin: 0 0 6px; color: #cbd5e1; font-size: 12px; font-weight: 700; }
 .relayAccessRow input { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 11px; background: rgba(3,7,18,.55); color: #fff; user-select: text; -webkit-user-select: text; touch-action: manipulation; }
+.netModeRow { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin: 9px 0; color: #cbd5e1; font-size: 12px; font-weight: 700; }
+.netModeRow select { width: 100%; min-height: 40px; padding: 8px 30px 8px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 11px; background: #111827; color: #fff; font: inherit; }
 .layoutPresetGroup { margin: 12px 0 6px; }
 .layoutPresetGroup > .smallText { display: block; margin-bottom: 6px; }
 .layoutPresets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

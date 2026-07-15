@@ -54,6 +54,7 @@
           <canvas id="screen" width="256" height="240"></canvas>
           <video id="remoteStream" class="remoteStream hidden" playsinline autoplay muted disablepictureinpicture></video>
           <audio id="remoteStreamAudio" autoplay></audio>
+          <div id="netPerformanceHud" class="netPerformanceHud hidden" aria-live="off"></div>
           <button id="fullscreenBtn" class="fullscreenBtn" aria-label="放大横屏" title="放大横屏">⛶</button>
         </div>
 
@@ -108,6 +109,13 @@
             <label for="relayAccessKey">私人联机访问码</label>
             <input id="relayAccessKey" type="password" autocomplete="off" placeholder="仅创建跨网房间时使用" />
           </div>
+          <label class="netModeRow" for="netModeSelect">
+            <span>联机模式</span>
+            <select id="netModeSelect">
+              <option value="rollback">低延迟回滚（推荐）</option>
+              <option value="stream">1P 权威串流（兼容）</option>
+            </select>
+          </label>
           <div class="menuGrid">
             <button id="netCopyBtn">复制邀请链接</button>
             <button id="netLeaveBtn" class="dangerButton">断开联机</button>

@@ -19,9 +19,11 @@ const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
 const RELAY_MIN_JITTER_BUFFER_MS = 35;
-const RELAY_MAX_JITTER_BUFFER_MS = 100;
+const RELAY_MAX_JITTER_BUFFER_MS = 75;
 const RELAY_MIN_GUEST_BUFFER_FRAMES = 3;
-const RELAY_MAX_GUEST_BUFFER_FRAMES = 45;
+// A large playback lead hides jitter but makes 2P feel like a delayed video.
+// Rollback absorbs short spikes, so keep the normal Tailscale path responsive.
+const RELAY_MAX_GUEST_BUFFER_FRAMES = 12;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
 const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
@@ -84,6 +86,8 @@ const controlOpacityValue = document.querySelector('#controlOpacityValue');
 const dpad = document.querySelector('#dpad');
 const actionZone = document.querySelector('.rightZone');
 const fullscreenBtn = document.querySelector('#fullscreenBtn');
+const netPerformanceHud = document.querySelector('#netPerformanceHud');
+const netModeSelect = document.querySelector('#netModeSelect');
 
 const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
 if (!isStandalone) document.body.classList.add('browser-mode');
@@ -182,10 +186,17 @@ let streamFirstFrameReady = false;
 let streamReadySent = false;
 let streamStatsTimer = 0;
 let streamStatsSummary = null;
+let performanceHudLastAt = 0;
+let performanceHudFrames = 0;
+let performanceHudFps = 0;
+let stateCheckStatus = '等待';
+let stateCheckFrame = 0;
+let stateMismatchCount = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
 const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
+const NET_MODE_STORAGE_KEY = 'pwa-nes-net-mode-v1';
 function getRuntimeRelayUrl() {
   try {
     const queryValue = new URLSearchParams(window.location.search).get('relay');
@@ -501,6 +512,9 @@ function getNetworkDiagnosticLog() {
     `rollbackCount=${rollbackCount}`,
     `rollbackFrames=${rollbackFrames}`,
     `rollbackSnapshots=${rollbackSnapshots.length}`,
+    `stateCheck=${stateCheckStatus}`,
+    `stateCheckFrame=${stateCheckFrame}`,
+    `stateMismatchCount=${stateMismatchCount}`,
     `gameFrame=${gameFrame}`,
     `hostFrame=${hostClockFrame ?? 'none'}`,
     `userAgent=${navigator.userAgent}`,
@@ -516,6 +530,44 @@ function setNetworkText(text) {
     inviteStatusText.textContent = text;
     inviteStatusText.classList.remove('hidden');
   }
+}
+
+function getPreferredNetworkPlayMode() {
+  const queryMode = new URLSearchParams(window.location.search).get('netmode');
+  if (queryMode === 'stream' || queryMode === 'rollback') return queryMode;
+  const selected = netModeSelect?.value;
+  if (selected === 'stream' || selected === 'rollback') return selected;
+  try {
+    return localStorage.getItem(NET_MODE_STORAGE_KEY) === 'stream' ? 'stream' : 'rollback';
+  } catch (error) {
+    return 'rollback';
+  }
+}
+
+function updatePerformanceHud(timestamp = performance.now()) {
+  if (!netPerformanceHud) return;
+  const active = networkRole !== 'offline' && peerConnected;
+  netPerformanceHud.classList.toggle('hidden', !active);
+  if (!active) return;
+  if (!performanceHudLastAt) performanceHudLastAt = timestamp;
+  const elapsed = timestamp - performanceHudLastAt;
+  if (elapsed >= 500) {
+    performanceHudFps = Math.round(performanceHudFrames * 1000 / elapsed);
+    performanceHudFrames = 0;
+    performanceHudLastAt = timestamp;
+  }
+  const streamMode = isAuthoritativeStreamMode();
+  const fps = streamMode ? Number(streamStatsSummary?.fps) || 0 : performanceHudFps;
+  const rtt = streamMode ? Number(streamStatsSummary?.rttMs) || 0 : Math.round(networkRttMs);
+  const buffer = streamMode ? Number(streamStatsSummary?.playoutMs) || 0 : getRelayGuestBufferFrames();
+  const bufferLabel = streamMode ? `${buffer}ms` : `${buffer}f`;
+  const sync = streamMode ? streamPeerConnection?.connectionState || '连接中' : `${stateCheckStatus}@${stateCheckFrame || '-'}`;
+  netPerformanceHud.textContent = `${streamMode ? '串流' : '回滚'}  FPS ${fps || '--'}  RTT ${rtt || '--'}ms  缓冲 ${bufferLabel}  回滚 ${rollbackCount}/${rollbackFrames}f  同步 ${sync}`;
+  const unhealthy = (fps > 0 && fps < 48) || rtt > 350 || stateCheckStatus === '差异';
+  const warning = !unhealthy && ((fps > 0 && fps < 56) || rtt > 180 || (!streamMode && getRelayGuestBufferFrames() > 8));
+  netPerformanceHud.classList.toggle('bad', unhealthy);
+  netPerformanceHud.classList.toggle('warn', warning);
+  netPerformanceHud.classList.toggle('good', !unhealthy && !warning);
 }
 
 function isAuthoritativeStreamMode() {
@@ -676,6 +728,7 @@ async function collectStreamStats() {
       }
     });
     streamStatsSummary = summary;
+    updatePerformanceHud();
   } catch (error) {
     logNetworkEvent('stream-stats-error', { message: error?.message || String(error) });
   }
@@ -1195,6 +1248,9 @@ function resetRollbackState({ capture = false, preserveInputsFromFrame = null } 
   lastStateCheckFrame = -1;
   pendingRollbackFrame = null;
   pendingRollbackReason = '';
+  stateCheckStatus = '等待';
+  stateCheckFrame = 0;
+  stateMismatchCount = 0;
   if (capture) captureRollbackSnapshot(true);
   rebuildScheduledNetworkInputs(gameFrame);
 }
@@ -1225,6 +1281,9 @@ function compareRollbackStateCheck(snapshot, expectedHash) {
     actualHash,
   });
   pendingStateChecks.delete(snapshot.frame);
+  stateCheckStatus = match ? '一致' : '差异';
+  stateCheckFrame = snapshot.frame;
+  if (!match) stateMismatchCount++;
   if (!match && networkRole === 'guest' && !stateRequestInFlight && !networkSyncId) {
     requestInitialStateSync('desync');
   }
@@ -1641,6 +1700,10 @@ function teardownPeerConnection(finalStatus = '') {
   lastNetworkPingAt = 0;
   lastGuestCatchUpLogAt = 0;
   lastLateInputResyncAt = 0;
+  performanceHudLastAt = 0;
+  performanceHudFrames = 0;
+  performanceHudFps = 0;
+  netPerformanceHud?.classList.add('hidden');
   const waitingText = networkTransport === 'relay' ? '跨网房间已创建，等待加入' : '直连房间已创建，等待加入';
   setNetworkText(finalStatus || (networkRole === 'host' ? waitingText : networkRole === 'guest' ? '已断开联机' : '未联机'));
   updateNetworkButtons();
@@ -2267,7 +2330,8 @@ function connectRelay(role, nextRoomId, ticket, guestTicket = '') {
   }
   teardownPeer();
   networkTransport = 'relay';
-  networkPlayMode = new URLSearchParams(window.location.search).get('netmode') === 'rollback' ? 'rollback' : 'stream';
+  networkPlayMode = getPreferredNetworkPlayMode();
+  if (netModeSelect) netModeSelect.value = networkPlayMode;
   networkRole = role;
   roomId = String(nextRoomId || '').trim() || generateRoomId();
   relayGuestTicket = guestTicket;
@@ -2851,11 +2915,13 @@ function loop(timestamp) {
     }
     nes.frame();
     gameFrame++;
+    performanceHudFrames++;
     elapsed -= FRAME_MS;
     frames++;
   }
 
   frameRemainder = elapsed;
+  updatePerformanceHud(timestamp);
   lastTick = timestamp;
   if (!isAuthoritativeStreamMode() && networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
     lastNetworkClockAt = timestamp;
@@ -3499,6 +3565,19 @@ window.addEventListener('pagehide', () => releaseAllButtons({ broadcast: true })
 readControlOffsets();
 applyControlOffsets();
 applyControlOpacity(localStorage.getItem(CONTROL_OPACITY_STORAGE_KEY) || 90);
+if (netModeSelect) {
+  try {
+    netModeSelect.value = localStorage.getItem(NET_MODE_STORAGE_KEY) === 'stream' ? 'stream' : 'rollback';
+  } catch (error) {
+    netModeSelect.value = 'rollback';
+  }
+  networkPlayMode = netModeSelect.value;
+  netModeSelect.addEventListener('change', () => {
+    const value = netModeSelect.value === 'stream' ? 'stream' : 'rollback';
+    try { localStorage.setItem(NET_MODE_STORAGE_KEY, value); } catch (error) { /* private mode */ }
+    if (networkRole === 'offline') networkPlayMode = value;
+  });
+}
 updateSoundButton();
 updateFullscreenButton();
 logNetworkEvent('app-start', { relayConfigured: Boolean(RELAY_SERVER_URL), online: navigator.onLine });
