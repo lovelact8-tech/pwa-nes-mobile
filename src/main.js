@@ -12,13 +12,15 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // One authoritative frame gives the host time to preserve short down/up input
 // transitions before both peers execute them on the same emulation frame.
 const NET_INPUT_DELAY_FRAMES = 1;
+const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
+const GUEST_INPUT_MAX_LEAD_FRAMES = 6;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_MIN_JITTER_BUFFER_MS = 35;
+const RELAY_MIN_JITTER_BUFFER_MS = 20;
 const RELAY_MAX_JITTER_BUFFER_MS = 75;
 const RELAY_MIN_GUEST_BUFFER_FRAMES = 3;
 // A large playback lead hides jitter but makes 2P feel like a delayed video.
@@ -1155,12 +1157,26 @@ function sendPeerButtons(player, buttons) {
     sendPeerMessage({ type: 'input', player, buttons: nextButtons, frame, id, order });
     return;
   }
-  // Predict 2P locally on the next frame. The host accepts this frame when it
-  // is inside the rollback window, then rewinds and confirms the same event.
-  const frame = gameFrame + 1;
+  // Schedule 2P against the host's clock, not the deliberately buffered guest
+  // clock. Sending gameFrame + 1 made every normal 2P event late at the host,
+  // forcing an expensive rollback for every press/release pair.
+  const estimatedHostFrame = getEstimatedHostFrame();
+  const transitFrames = networkRttMs > 0 ? Math.ceil((networkRttMs / 2) / FRAME_MS) : 1;
+  const leadFrames = Math.max(GUEST_INPUT_MIN_LEAD_FRAMES, Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames));
+  const frame = Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
   const order = ++networkEventOrder;
   scheduleNetworkInput(player, nextButtons, frame, { id, order });
-  logNetworkEvent('input-send', { role: 'guest', player, buttons: nextButtons, frame, id, predicted: true });
+  logNetworkEvent('input-send', {
+    role: 'guest',
+    player,
+    buttons: nextButtons,
+    frame,
+    localFrame: gameFrame,
+    estimatedHostFrame: Math.round(estimatedHostFrame),
+    leadFrames,
+    id,
+    predicted: true,
+  });
   sendPeerMessage({ type: 'input-request', player, buttons: nextButtons, frame, id });
 }
 
@@ -1168,6 +1184,12 @@ function getNetworkInputDelayFrames() {
   // The guest carries the latency buffer. Delaying host input by half the RTT
   // made local controls take one or two seconds on overseas relay routes.
   return NET_INPUT_DELAY_FRAMES;
+}
+
+function getEstimatedHostFrame(now = performance.now()) {
+  if (hostClockFrame === null) return gameFrame + getRelayGuestBufferFrames();
+  const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
+  return hostClockFrame + (transitEstimate + now - hostClockReceivedAt) / FRAME_MS;
 }
 
 function recordNetworkRtt(sampleMs, source = 'ping') {
@@ -1840,7 +1862,7 @@ function handleNetworkMessage(message) {
     const delayFrames = getNetworkInputDelayFrames();
     const requestedFrame = Math.max(0, Math.floor(Number(message.frame) || gameFrame));
     const oldestRollbackFrame = rollbackSnapshots[0]?.frame ?? gameFrame;
-    const frame = requestedFrame >= oldestRollbackFrame && requestedFrame <= gameFrame + 2
+    const frame = requestedFrame >= oldestRollbackFrame && requestedFrame <= gameFrame + GUEST_INPUT_MAX_LEAD_FRAMES + 2
       ? requestedFrame
       : gameFrame + delayFrames;
     const id = String(message.id || `g-legacy-${++networkEventOrder}`);
@@ -2864,8 +2886,7 @@ function loop(timestamp) {
 
   let guestFrameDifference = 0;
   if (networkRole === 'guest' && peerConnected && hostClockFrame !== null) {
-    const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
-    const estimatedHostFrame = hostClockFrame + (transitEstimate + timestamp - hostClockReceivedAt) / FRAME_MS;
+    const estimatedHostFrame = getEstimatedHostFrame(timestamp);
     const bufferFrames = getRelayGuestBufferFrames();
     const frameDifference = estimatedHostFrame - bufferFrames - gameFrame;
     guestFrameDifference = frameDifference;
