@@ -77,7 +77,17 @@ export function captureDeterministicState(nes) {
   ppu.pixrendered = [];
   ppu.vramMirrorTable = [];
   try {
-    return nes.toJSON();
+    const state = nes.toJSON();
+    // jsnes controllers use ordinary JavaScript arrays. Its generic toJSON
+    // helper only clones TypedArrays, so without this copy every historical
+    // rollback snapshot points at the live controller state and changes when
+    // a later button is pressed.
+    for (const player of [1, 2]) {
+      if (state.controllers?.[player]?.state) {
+        state.controllers[player].state = Array.from(state.controllers[player].state);
+      }
+    }
+    return state;
   } finally {
     Object.assign(ppu, omitted);
   }

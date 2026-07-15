@@ -156,6 +156,21 @@ assertEqual(stateHash(restored), stateHash(source), '快照恢复后的状态');
 assertEqual(restored.getFrameHash(), source.getFrameHash(), '快照恢复后的画面');
 console.log('✓ 精简快照恢复：继续运行360帧一致');
 
+const immutableSource = createEmulator();
+advance(immutableSource, 0, 240);
+const immutableSnapshot = captureDeterministicState(immutableSource.nes);
+const immutableBaseline = structuredClone(immutableSnapshot);
+const immutableHash = hashDeterministicState(immutableSnapshot);
+advance(immutableSource, 240, 420);
+if (hashDeterministicState(immutableSnapshot) !== immutableHash) {
+  console.error(firstDifference(
+    deterministicStateView(immutableSnapshot),
+    deterministicStateView(immutableBaseline),
+  ));
+}
+assertEqual(hashDeterministicState(immutableSnapshot), immutableHash, '历史快照不可变性');
+console.log('✓ 历史快照：后续模拟不会修改已保存状态');
+
 const crossRateSource = createEmulator(44100);
 advance(crossRateSource, 0, 240);
 const crossRateSnapshot = captureDeterministicState(crossRateSource.nes);
