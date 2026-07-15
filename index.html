@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="theme-color" content="#05070d" />
+    <meta name="theme-color" content="#070a12" />
+    <meta name="description" content="为手机设计的私人 NES 游戏机，支持中文游戏库、云存档和双人联机。" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./icon-192.png" />
     <title>PWA NES Mobile</title>
@@ -13,183 +14,181 @@
   <body>
     <div id="app">
       <section id="landing" class="landing">
-        <div class="card">
-          <div class="brandMark" aria-hidden="true">FC</div>
-          <p class="eyebrow">随时开机 · 支持双人直连</p>
-          <h1>PWA NES</h1>
-          <p class="subtitle">为手机重新设计的 NES 模拟器，支持中文游戏库、存档和 WebRTC 双人联机。</p>
-          <div class="landingActions">
-            <label class="fileBtn primaryAction">
-              从本机选择游戏
-              <input id="romInput" type="file" accept=".nes,application/octet-stream" />
-            </label>
-            <button id="libraryBtn" class="secondary">搜索中文游戏库</button>
-            <button id="demoBtn" class="ghostButton">预览虚拟手柄</button>
-          </div>
-          <form id="joinRoomForm" class="joinRoomForm">
-            <label for="joinRoomInput">加入联机房间</label>
+        <div class="landingGlow glowOne"></div><div class="landingGlow glowTwo"></div>
+        <main class="homeShell">
+          <header class="homeHeader">
+            <a class="brand" href="./" aria-label="PWA NES 首页">
+              <span class="brandMark" aria-hidden="true"><span>FC</span></span>
+              <span><strong>PWA NES</strong><small>PRIVATE ARCADE</small></span>
+            </a>
+            <span class="privateBadge"><i></i>私人游戏机</span>
+          </header>
+
+          <section class="heroPanel">
+            <div class="heroCopy">
+              <p class="eyebrow">随时开机 · 双人同屏</p>
+              <h1>把童年的游戏机<br /><em>装进口袋</em></h1>
+              <p class="subtitle">中文游戏库、即时存档、自定义手柄和低延迟双人联机，全部为手机重新设计。</p>
+            </div>
+            <div class="consoleArt" aria-hidden="true">
+              <span class="consoleLed"></span><span class="consoleSlot"></span>
+              <div class="miniPad"><b></b><i></i><i></i></div>
+              <strong>8-BIT<br />SYSTEM</strong>
+            </div>
+          </section>
+
+          <section class="launchPanel">
+            <div class="sectionHeading"><span>开始游戏</span><small>选择一种启动方式</small></div>
+            <div class="launchGrid">
+              <label class="launchCard primaryAction" data-icon="folder">
+                <span><strong>本机游戏</strong><small>打开 .nes 文件</small></span><b>›</b>
+                <input id="romInput" type="file" accept=".nes,application/octet-stream" />
+              </label>
+              <button id="libraryBtn" class="launchCard" data-icon="search">
+                <span><strong>中文游戏库</strong><small>搜索 1500+ 游戏</small></span><b>›</b>
+              </button>
+              <button id="demoBtn" class="launchCard compactCard" data-icon="gamepad">
+                <span><strong>手柄预览</strong><small>先试试键位</small></span><b>›</b>
+              </button>
+            </div>
+          </section>
+
+          <form id="joinRoomForm" class="joinPanel">
+            <div class="sectionHeading"><span>加入双人房间</span><small>2P 快速加入</small></div>
             <div class="joinRoomRow">
-              <input id="joinRoomInput" type="text" inputmode="url" autocomplete="off" placeholder="粘贴 1P 发来的房间链接" />
+              <span class="inputIcon" data-icon="link"></span>
+              <input id="joinRoomInput" type="text" inputmode="url" autocomplete="off" placeholder="粘贴 1P 发来的邀请链接" aria-label="房间邀请链接" />
               <button id="joinRoomBtn" type="submit">加入</button>
             </div>
+            <p id="inviteStatusText" class="inviteStatus hidden" role="status"></p>
           </form>
-          <p id="inviteStatusText" class="inviteStatus hidden" role="status"></p>
-          <div class="featureChips" aria-label="功能特点">
-            <span>离线可玩</span><span>即时存档</span><span>自定义手柄</span>
-          </div>
-          <p class="hint">iPhone 建议使用 Safari“添加到主屏幕”，可获得更大的游戏区域。</p>
-        </div>
+
+          <footer class="homeFooter">
+            <span><i></i>离线可玩</span><span><i></i>私人存档</span><span><i></i>自定义手柄</span>
+            <p>iPhone 建议使用 Safari“添加到主屏幕”</p>
+          </footer>
+        </main>
       </section>
 
       <section id="game" class="game hidden">
-        <div class="topHud">
-          <button id="menuBtn">菜单</button>
-          <span id="statusText">未加载游戏</span>
-          <button id="settingsBtn">设置</button>
-          <button id="soundBtn">声音</button>
-          <button id="pauseBtn">暂停</button>
-        </div>
+        <header class="topHud">
+          <button id="menuBtn" class="hudButton" data-icon="menu" aria-label="菜单"><span>菜单</span></button>
+          <div class="gameIdentity"><span class="liveDot"></span><span id="statusText">未加载游戏</span></div>
+          <div class="hudActions">
+            <button id="settingsBtn" class="hudButton iconOnly" data-icon="settings" aria-label="设置"></button>
+            <button id="soundBtn" class="hudButton iconOnly" data-icon="volume" aria-label="声音"></button>
+            <button id="pauseBtn" class="hudButton iconOnly" data-icon="pause" aria-label="暂停"></button>
+          </div>
+        </header>
 
         <div id="screenWrap" class="screenWrap">
-          <canvas id="screen" width="256" height="240"></canvas>
-          <video id="remoteStream" class="remoteStream hidden" playsinline autoplay muted disablepictureinpicture></video>
-          <audio id="remoteStreamAudio" autoplay></audio>
+          <div class="screenBezel">
+            <canvas id="screen" width="256" height="240"></canvas>
+            <video id="remoteStream" class="remoteStream hidden" playsinline autoplay muted disablepictureinpicture></video>
+            <audio id="remoteStreamAudio" autoplay></audio>
+          </div>
           <div id="netPerformanceHud" class="netPerformanceHud hidden" aria-live="off"></div>
-          <button id="fullscreenBtn" class="fullscreenBtn" aria-label="放大横屏" title="放大横屏">⛶</button>
+          <button id="fullscreenBtn" class="fullscreenBtn" data-icon="expand" aria-label="放大横屏" title="放大横屏"></button>
         </div>
 
         <div id="controller" class="controller">
           <div class="leftZone">
             <div id="dpad" class="dpad" aria-label="方向键">
-              <div class="padVisual up">▲</div>
-              <div class="padVisual left">◀</div>
-              <div class="padVisual center"></div>
-              <div class="padVisual right">▶</div>
-              <div class="padVisual down">▼</div>
+              <div class="dpadPlate"></div>
+              <div class="padVisual up"><span>▲</span></div>
+              <div class="padVisual left"><span>◀</span></div>
+              <div class="padVisual center"><i></i></div>
+              <div class="padVisual right"><span>▶</span></div>
+              <div class="padVisual down"><span>▼</span></div>
               <div class="dpadTouch"></div>
             </div>
           </div>
 
           <div class="middleZone">
-            <button class="pill" data-btn="SELECT">SELECT</button>
-            <button class="pill" data-btn="START">START</button>
+            <button class="pill" data-btn="SELECT"><span></span><b>SELECT</b></button>
+            <button class="pill" data-btn="START"><span></span><b>START</b></button>
           </div>
 
           <div class="rightZone">
-            <button class="round b" data-btn="B">B</button>
-            <button class="round combo" data-btn="AB" aria-label="AB 同时按">AB</button>
-            <button class="round a" data-btn="A">A</button>
-            <button class="round small tb" data-btn="TURBO_B">连 B</button>
-            <button class="round small ta" data-btn="TURBO_A">连 A</button>
+            <div class="actionGuide" aria-hidden="true"></div>
+            <button class="round b" data-btn="B"><span>B</span><small>返回</small></button>
+            <button class="round combo" data-btn="AB" aria-label="AB 同时按"><span>AB</span></button>
+            <button class="round a" data-btn="A"><span>A</span><small>确定</small></button>
+            <button class="round small tb" data-btn="TURBO_B"><span>B</span><small>TURBO</small></button>
+            <button class="round small ta" data-btn="TURBO_A"><span>A</span><small>TURBO</small></button>
           </div>
         </div>
       </section>
 
-      <dialog id="menuDialog" class="menuDialog">
-        <h2>菜单</h2>
-        <section class="menuSection">
-          <h3>游戏</h3>
-          <div class="menuGrid">
-            <label class="fileBtn compact">
-              本机游戏
-              <input id="romInput2" type="file" accept=".nes,application/octet-stream" />
-            </label>
-            <button id="menuLibraryBtn">中文游戏库</button>
-            <button id="saveStateBtn">保存进度</button>
-            <button id="loadStateBtn">读取进度</button>
-          </div>
-        </section>
-        <section class="menuSection">
-          <h3>私人云存档</h3>
-          <label class="cloudAccessRow" for="cloudAccessKey">
-            <span>访问码</span>
-            <input id="cloudAccessKey" type="password" autocomplete="off" placeholder="与私人联机访问码相同" />
-          </label>
-          <label class="cloudCheckRow">
-            <input id="cloudRememberKey" type="checkbox" checked />
-            <span>仅在本设备记住访问码</span>
-          </label>
-          <label class="cloudCheckRow">
-            <input id="cloudAutoBackup" type="checkbox" checked />
-            <span>本地保存时自动备份到私人云</span>
-          </label>
-          <div class="menuGrid">
-            <button id="cloudSaveBtn">上传当前进度</button>
-            <button id="cloudManageBtn">管理云存档</button>
-          </div>
-          <button id="cloudFavoriteBtn" class="cloudFavoriteBtn">☆ 收藏当前游戏</button>
-          <p id="cloudStatusText" class="networkStatus" role="status">尚未连接私人云</p>
-        </section>
-        <section class="menuSection">
-          <h3>双人联机</h3>
-          <div class="menuGrid">
-            <button id="netHostBtn">创建直连房间</button>
-            <button id="relayHostBtn">创建跨网房间</button>
-          </div>
-          <div id="relayAccessRow" class="relayAccessRow hidden">
-            <label for="relayAccessKey">私人联机访问码</label>
-            <input id="relayAccessKey" type="password" autocomplete="off" placeholder="仅创建跨网房间时使用" />
-          </div>
-          <label class="netModeRow" for="netModeSelect">
-            <span>联机模式</span>
-            <select id="netModeSelect">
-              <option value="rollback">低延迟回滚（推荐）</option>
-              <option value="stream">1P 权威串流（兼容）</option>
-            </select>
-          </label>
-          <div class="menuGrid">
-            <button id="netCopyBtn">复制邀请链接</button>
-            <button id="netLeaveBtn" class="dangerButton">断开联机</button>
-          </div>
-          <input id="netLinkInput" class="netLink" type="text" readonly aria-label="联机邀请链接" />
-          <p id="netStatusText" class="networkStatus" role="status">未联机</p>
-          <button id="netLogBtn" type="button">复制联机诊断日志</button>
-          <details class="networkLogDetails">
-            <summary>查看联机日志</summary>
-            <pre id="netLogOutput" aria-live="polite"></pre>
-          </details>
-        </section>
-        <section class="menuSection menuFooterActions">
-          <button id="resetBtn" class="dangerButton">重启游戏</button>
-          <button id="resumeBtn">继续游戏</button>
-        </section>
-        <button id="closeMenuBtn" class="ghostButton">关闭菜单</button>
-      </dialog>
+      <dialog id="menuDialog" class="menuDialog appDialog">
+        <header class="dialogHeader"><div><span class="dialogKicker">CONTROL CENTER</span><h2>游戏菜单</h2></div><button id="closeMenuBtn" class="dialogClose" data-icon="close" aria-label="关闭菜单"></button></header>
+        <div class="dialogScroll">
+          <section class="menuSection">
+            <h3 data-icon="gamepad">游戏与存档</h3>
+            <div class="menuGrid">
+              <label class="menuAction featured" data-icon="folder"><span><strong>本机游戏</strong><small>打开 ROM</small></span><input id="romInput2" type="file" accept=".nes,application/octet-stream" /></label>
+              <button id="menuLibraryBtn" class="menuAction" data-icon="search"><span><strong>中文游戏库</strong><small>搜索游戏</small></span></button>
+              <button id="saveStateBtn" class="menuAction" data-icon="save"><span><strong>保存进度</strong><small>保存到本机</small></span></button>
+              <button id="loadStateBtn" class="menuAction" data-icon="download"><span><strong>读取进度</strong><small>恢复游戏</small></span></button>
+            </div>
+          </section>
 
-      <dialog id="libraryDialog" class="libraryDialog">
-        <h2>中文游戏库</h2>
-        <input id="librarySearchInput" class="librarySearch" type="search" placeholder="搜索游戏名称，例如：魂斗罗" autocomplete="off" />
-        <p id="libraryStatusText" class="smallText">正在读取游戏目录...</p>
-        <div id="libraryResults" class="libraryResults"></div>
-        <button id="closeLibraryBtn">关闭</button>
-      </dialog>
+          <section class="menuSection">
+            <h3 data-icon="cloud">私人云存档</h3>
+            <label class="fieldRow" for="cloudAccessKey"><span>访问码</span><input id="cloudAccessKey" type="password" autocomplete="off" placeholder="与私人联机访问码相同" /></label>
+            <div class="toggleRows">
+              <label><input id="cloudRememberKey" type="checkbox" checked /><span><b>记住访问码</b><small>仅保存在当前设备</small></span></label>
+              <label><input id="cloudAutoBackup" type="checkbox" checked /><span><b>自动云备份</b><small>保存进度时同步上传</small></span></label>
+            </div>
+            <div class="menuGrid compactGrid">
+              <button id="cloudSaveBtn" class="menuAction" data-icon="upload"><span><strong>立即上传</strong></span></button>
+              <button id="cloudManageBtn" class="menuAction" data-icon="cloud"><span><strong>管理存档</strong></span></button>
+            </div>
+            <button id="cloudFavoriteBtn" class="wideAction" data-icon="star">收藏当前游戏</button>
+            <p id="cloudStatusText" class="networkStatus" role="status">尚未连接私人云</p>
+          </section>
 
-      <dialog id="cloudDialog" class="cloudDialog">
-        <h2>私人云存档</h2>
-        <p id="cloudDialogStatus" class="smallText">正在读取云存档...</p>
-        <div id="cloudSaveList" class="cloudSaveList"></div>
-        <button id="closeCloudBtn">关闭</button>
-      </dialog>
-
-      <dialog id="settingsDialog">
-        <h2>设置</h2>
-        <label class="settingRange" for="controlOpacityInput">
-          <span>手柄透明度</span>
-          <output id="controlOpacityValue" for="controlOpacityInput">90%</output>
-        </label>
-        <input id="controlOpacityInput" class="rangeInput" type="range" min="45" max="100" step="5" value="90" />
-        <button id="layoutEditBtn">调整按键位置</button>
-        <div class="layoutPresetGroup" role="group" aria-label="全局按键大小">
-          <span class="smallText">全局按键大小</span>
-          <div class="layoutPresets">
-            <button type="button" data-layout-scale="0.85">小</button>
-            <button type="button" data-layout-scale="1">标准</button>
-            <button type="button" data-layout-scale="1.15">大</button>
-          </div>
+          <section class="menuSection">
+            <h3 data-icon="users">双人联机</h3>
+            <div class="menuGrid">
+              <button id="netHostBtn" class="menuAction" data-icon="wifi"><span><strong>直连房间</strong><small>同网络优先</small></span></button>
+              <button id="relayHostBtn" class="menuAction featured" data-icon="users"><span><strong>跨网房间</strong><small>私人中继</small></span></button>
+            </div>
+            <div id="relayAccessRow" class="relayAccessRow hidden"><label for="relayAccessKey">私人联机访问码</label><input id="relayAccessKey" type="password" autocomplete="off" placeholder="仅创建跨网房间时使用" /></div>
+            <label class="selectRow" for="netModeSelect"><span><b>同步方式</b><small>推荐低延迟回滚</small></span><select id="netModeSelect"><option value="rollback">低延迟回滚</option><option value="stream">1P 权威串流</option></select></label>
+            <div class="menuGrid compactGrid">
+              <button id="netCopyBtn" class="menuAction" data-icon="copy"><span><strong>复制邀请</strong></span></button>
+              <button id="netLeaveBtn" class="menuAction dangerButton" data-icon="power"><span><strong>断开联机</strong></span></button>
+            </div>
+            <input id="netLinkInput" class="netLink" type="text" readonly aria-label="联机邀请链接" />
+            <p id="netStatusText" class="networkStatus" role="status">未联机</p>
+            <button id="netLogBtn" type="button" class="textAction">复制联机诊断日志</button>
+            <details class="networkLogDetails"><summary>查看联机日志</summary><pre id="netLogOutput" aria-live="polite"></pre></details>
+          </section>
         </div>
-        <button id="resetLayoutBtn">重置按键位置</button>
-        <button id="closeSettingsBtn">关闭</button>
-        <p id="settingsModeText" class="smallText">横屏与竖屏布局会分别保存，不会互相影响。</p>
+        <footer class="dialogFooter"><button id="resetBtn" class="footerDanger" data-icon="rotate">重启</button><button id="resumeBtn" class="footerPrimary" data-icon="play">继续游戏</button></footer>
+      </dialog>
+
+      <dialog id="libraryDialog" class="libraryDialog appDialog">
+        <header class="dialogHeader"><div><span class="dialogKicker">GAME LIBRARY</span><h2>中文游戏库</h2></div><button id="closeLibraryBtn" class="dialogClose" data-icon="close" aria-label="关闭"></button></header>
+        <div class="searchBox"><span data-icon="search"></span><input id="librarySearchInput" class="librarySearch" type="search" placeholder="搜索游戏名称，例如：魂斗罗" autocomplete="off" /></div>
+        <p id="libraryStatusText" class="smallText">正在读取游戏目录...</p><div id="libraryResults" class="libraryResults"></div>
+      </dialog>
+
+      <dialog id="cloudDialog" class="cloudDialog appDialog">
+        <header class="dialogHeader"><div><span class="dialogKicker">PRIVATE CLOUD</span><h2>私人云存档</h2></div><button id="closeCloudBtn" class="dialogClose" data-icon="close" aria-label="关闭"></button></header>
+        <p id="cloudDialogStatus" class="smallText">正在读取云存档...</p><div id="cloudSaveList" class="cloudSaveList"></div>
+      </dialog>
+
+      <dialog id="settingsDialog" class="settingsDialog appDialog">
+        <header class="dialogHeader"><div><span class="dialogKicker">CONTROLLER</span><h2>手柄设置</h2></div><button id="closeSettingsBtn" class="dialogClose" data-icon="close" aria-label="关闭"></button></header>
+        <section class="settingsGroup">
+          <div class="settingRange"><span><b>手柄透明度</b><small>降低可减少画面遮挡</small></span><output id="controlOpacityValue" for="controlOpacityInput">90%</output></div>
+          <input id="controlOpacityInput" class="rangeInput" type="range" min="45" max="100" step="5" value="90" />
+        </section>
+        <section class="settingsGroup"><div class="groupTitle"><span>按键大小</span><small>横竖屏分别保存</small></div><div class="layoutPresets" role="group" aria-label="全局按键大小"><button type="button" data-layout-scale="0.85">紧凑</button><button type="button" data-layout-scale="1">标准</button><button type="button" data-layout-scale="1.15">放大</button></div></section>
+        <section class="settingsActions"><button id="layoutEditBtn" class="settingsPrimary" data-icon="sliders">调整按键位置</button><button id="resetLayoutBtn" data-icon="rotate">恢复默认布局</button></section>
+        <p id="settingsModeText" class="settingsHint">横屏与竖屏布局会分别保存，不会互相影响。</p>
       </dialog>
     </div>
     <script type="module" src="./src/main.js"></script>

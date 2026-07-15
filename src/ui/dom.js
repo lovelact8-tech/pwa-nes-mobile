@@ -1,0 +1,25 @@
+const byId = (id) => document.getElementById(id);
+
+export const ui = Object.freeze({
+  landing: byId('landing'), game: byId('game'), canvas: byId('screen'),
+  remoteStreamVideo: byId('remoteStream'), remoteStreamAudio: byId('remoteStreamAudio'),
+  romInput: byId('romInput'), romInput2: byId('romInput2'), demoBtn: byId('demoBtn'),
+  libraryBtn: byId('libraryBtn'), menuLibraryBtn: byId('menuLibraryBtn'), libraryDialog: byId('libraryDialog'),
+  librarySearchInput: byId('librarySearchInput'), libraryStatusText: byId('libraryStatusText'),
+  libraryResults: byId('libraryResults'), closeLibraryBtn: byId('closeLibraryBtn'), statusText: byId('statusText'),
+  inviteStatusText: byId('inviteStatusText'), joinRoomForm: byId('joinRoomForm'), joinRoomInput: byId('joinRoomInput'),
+  pauseBtn: byId('pauseBtn'), soundBtn: byId('soundBtn'), settingsBtn: byId('settingsBtn'), menuBtn: byId('menuBtn'),
+  menuDialog: byId('menuDialog'), settingsDialog: byId('settingsDialog'), closeMenuBtn: byId('closeMenuBtn'),
+  resumeBtn: byId('resumeBtn'), resetBtn: byId('resetBtn'), saveStateBtn: byId('saveStateBtn'), loadStateBtn: byId('loadStateBtn'),
+  netHostBtn: byId('netHostBtn'), relayHostBtn: byId('relayHostBtn'), relayAccessRow: byId('relayAccessRow'),
+  relayAccessKey: byId('relayAccessKey'), netCopyBtn: byId('netCopyBtn'), netLeaveBtn: byId('netLeaveBtn'),
+  netLinkInput: byId('netLinkInput'), netStatusText: byId('netStatusText'), netLogBtn: byId('netLogBtn'), netLogOutput: byId('netLogOutput'),
+  cloudAccessKey: byId('cloudAccessKey'), cloudRememberKey: byId('cloudRememberKey'), cloudAutoBackup: byId('cloudAutoBackup'),
+  cloudSaveBtn: byId('cloudSaveBtn'), cloudManageBtn: byId('cloudManageBtn'), cloudFavoriteBtn: byId('cloudFavoriteBtn'),
+  cloudStatusText: byId('cloudStatusText'), cloudDialog: byId('cloudDialog'), cloudDialogStatus: byId('cloudDialogStatus'),
+  cloudSaveList: byId('cloudSaveList'), closeCloudBtn: byId('closeCloudBtn'), layoutEditBtn: byId('layoutEditBtn'),
+  resetLayoutBtn: byId('resetLayoutBtn'), closeSettingsBtn: byId('closeSettingsBtn'), settingsModeText: byId('settingsModeText'),
+  layoutPresetButtons: document.querySelectorAll('[data-layout-scale]'), controlOpacityInput: byId('controlOpacityInput'),
+  controlOpacityValue: byId('controlOpacityValue'), dpad: byId('dpad'), actionZone: document.querySelector('.rightZone'),
+  fullscreenBtn: byId('fullscreenBtn'), netPerformanceHud: byId('netPerformanceHud'), netModeSelect: byId('netModeSelect'),
+});

@@ -2,111 +2,45 @@ import './style.css';
 import { NES, Controller } from 'jsnes';
 import Peer from 'peerjs';
 import { gzipSync, gunzipSync, strFromU8, strToU8, unzipSync } from 'fflate';
+import { ui } from './ui/dom.js';
+import { hydrateIcons } from './ui/icons.js';
+import { createDialogController } from './ui/dialogs.js';
+import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
+import {
+  MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
+  GUEST_INPUT_MAX_LEAD_FRAMES, GUEST_INPUT_MAX_SAFETY_FRAMES, GUEST_INPUT_SAFETY_DECAY_MS,
+  NET_CLOCK_INTERVAL_MS, NETWORK_SYNC_TIMEOUT_MS, DEFAULT_NETWORK_RTT_MS,
+  RELAY_MIN_JITTER_BUFFER_MS, RELAY_MAX_JITTER_BUFFER_MS, RELAY_MIN_GUEST_BUFFER_FRAMES,
+  RELAY_MAX_GUEST_BUFFER_FRAMES, HOST_CLOCK_STALE_MS, GUEST_FAST_CATCHUP_THRESHOLD_FRAMES,
+  GUEST_FAST_CATCHUP_MAX_FRAMES, LATE_INPUT_RESYNC_COOLDOWN_MS, ROLLBACK_SNAPSHOT_INTERVAL_FRAMES,
+  ROLLBACK_WINDOW_FRAMES, ROLLBACK_MAX_SNAPSHOTS, NETWORK_STATE_CHECK_INTERVAL_FRAMES,
+} from './netplay/constants.js';
+import {
+  NETWORK_STORAGE_KEY, RELAY_URL_STORAGE_KEY, NET_MODE_STORAGE_KEY, CLOUD_ACCESS_KEY_STORAGE_KEY,
+  CLOUD_AUTO_BACKUP_STORAGE_KEY, CLOUD_DEVICE_ID_STORAGE_KEY, CONTROL_LAYOUT_STORAGE_KEY,
+  LEGACY_CONTROL_LAYOUT_STORAGE_KEY, CONTROL_OPACITY_STORAGE_KEY, SAVE_STATE_STORAGE_KEY,
+} from './storage/keys.js';
 
-const SCREEN_WIDTH = 256;
-const SCREEN_HEIGHT = 240;
-const FRAMEBUFFER_SIZE = SCREEN_WIDTH * SCREEN_HEIGHT;
-const FRAME_MS = 1000 / 60;
-const MAX_FRAME_DELTA_MS = FRAME_MS * 3;
-const MAX_PEER_QUEUE_SIZE = 32;
-// One authoritative frame gives the host time to preserve short down/up input
-// transitions before both peers execute them on the same emulation frame.
-const NET_INPUT_DELAY_FRAMES = 1;
-const GUEST_INPUT_MIN_LEAD_FRAMES = 1;
-const GUEST_INPUT_MAX_LEAD_FRAMES = 4;
-const GUEST_INPUT_MAX_SAFETY_FRAMES = 2;
-const GUEST_INPUT_SAFETY_DECAY_MS = 15000;
-const NET_CLOCK_INTERVAL_MS = 100;
-const NETWORK_SYNC_TIMEOUT_MS = 30000;
-// Relay guests intentionally run a little behind the host so authoritative
-// inputs arrive before the guest reaches their frame. Keep this buffer small:
-// Tailscale can begin on DERP and switch to a much faster direct route later.
-const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_MIN_JITTER_BUFFER_MS = 8;
-const RELAY_MAX_JITTER_BUFFER_MS = 50;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 1;
-// A large playback lead hides jitter but makes 2P feel like a delayed video.
-// Rollback absorbs short spikes, so keep the normal Tailscale path responsive.
-const RELAY_MAX_GUEST_BUFFER_FRAMES = 4;
-// A stale host clock must never be extrapolated indefinitely. Mobile VPNs can
-// briefly keep a WebSocket open while no packets are delivered; continuing the
-// emulator in that state creates two permanently different matches.
-const HOST_CLOCK_STALE_MS = 750;
-const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
-const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
-const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
-const ROLLBACK_SNAPSHOT_INTERVAL_FRAMES = 8;
-const ROLLBACK_WINDOW_FRAMES = 128;
-const ROLLBACK_MAX_SNAPSHOTS = Math.ceil(ROLLBACK_WINDOW_FRAMES / ROLLBACK_SNAPSHOT_INTERVAL_FRAMES) + 2;
-const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 160;
-
-const landing = document.querySelector('#landing');
-const game = document.querySelector('#game');
-const canvas = document.querySelector('#screen');
+hydrateIcons();
+const {
+  landing, game, canvas, remoteStreamVideo, remoteStreamAudio, romInput, romInput2, demoBtn,
+  libraryBtn, menuLibraryBtn, libraryDialog, librarySearchInput, libraryStatusText, libraryResults,
+  closeLibraryBtn, statusText, inviteStatusText, joinRoomForm, joinRoomInput, pauseBtn, soundBtn,
+  settingsBtn, menuBtn, menuDialog, settingsDialog, closeMenuBtn, resumeBtn, resetBtn, saveStateBtn,
+  loadStateBtn, netHostBtn, relayHostBtn, relayAccessRow, relayAccessKey, netCopyBtn, netLeaveBtn,
+  netLinkInput, netStatusText, netLogBtn, netLogOutput, cloudAccessKey, cloudRememberKey,
+  cloudAutoBackup, cloudSaveBtn, cloudManageBtn, cloudFavoriteBtn, cloudStatusText, cloudDialog,
+  cloudDialogStatus, cloudSaveList, closeCloudBtn, layoutEditBtn, resetLayoutBtn, closeSettingsBtn,
+  settingsModeText, layoutPresetButtons, controlOpacityInput, controlOpacityValue, dpad, actionZone,
+  fullscreenBtn, netPerformanceHud, netModeSelect,
+} = ui;
 const ctx = canvas.getContext('2d');
-const remoteStreamVideo = document.querySelector('#remoteStream');
-const remoteStreamAudio = document.querySelector('#remoteStreamAudio');
 const imageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 const frameBuffer32 = new Uint32Array(imageData.data.buffer);
-
-const romInput = document.querySelector('#romInput');
-const romInput2 = document.querySelector('#romInput2');
-const demoBtn = document.querySelector('#demoBtn');
-const libraryBtn = document.querySelector('#libraryBtn');
-const menuLibraryBtn = document.querySelector('#menuLibraryBtn');
-const libraryDialog = document.querySelector('#libraryDialog');
-const librarySearchInput = document.querySelector('#librarySearchInput');
-const libraryStatusText = document.querySelector('#libraryStatusText');
-const libraryResults = document.querySelector('#libraryResults');
-const closeLibraryBtn = document.querySelector('#closeLibraryBtn');
-const statusText = document.querySelector('#statusText');
-const inviteStatusText = document.querySelector('#inviteStatusText');
-const joinRoomForm = document.querySelector('#joinRoomForm');
-const joinRoomInput = document.querySelector('#joinRoomInput');
-const pauseBtn = document.querySelector('#pauseBtn');
-const soundBtn = document.querySelector('#soundBtn');
-const settingsBtn = document.querySelector('#settingsBtn');
-const menuBtn = document.querySelector('#menuBtn');
-const menuDialog = document.querySelector('#menuDialog');
-const settingsDialog = document.querySelector('#settingsDialog');
-const closeMenuBtn = document.querySelector('#closeMenuBtn');
-const resumeBtn = document.querySelector('#resumeBtn');
-const resetBtn = document.querySelector('#resetBtn');
-const saveStateBtn = document.querySelector('#saveStateBtn');
-const loadStateBtn = document.querySelector('#loadStateBtn');
-const netHostBtn = document.querySelector('#netHostBtn');
-const relayHostBtn = document.querySelector('#relayHostBtn');
-const relayAccessRow = document.querySelector('#relayAccessRow');
-const relayAccessKey = document.querySelector('#relayAccessKey');
-const netCopyBtn = document.querySelector('#netCopyBtn');
-const netLeaveBtn = document.querySelector('#netLeaveBtn');
-const netLinkInput = document.querySelector('#netLinkInput');
-const netStatusText = document.querySelector('#netStatusText');
-const netLogBtn = document.querySelector('#netLogBtn');
-const netLogOutput = document.querySelector('#netLogOutput');
-const cloudAccessKey = document.querySelector('#cloudAccessKey');
-const cloudRememberKey = document.querySelector('#cloudRememberKey');
-const cloudAutoBackup = document.querySelector('#cloudAutoBackup');
-const cloudSaveBtn = document.querySelector('#cloudSaveBtn');
-const cloudManageBtn = document.querySelector('#cloudManageBtn');
-const cloudFavoriteBtn = document.querySelector('#cloudFavoriteBtn');
-const cloudStatusText = document.querySelector('#cloudStatusText');
-const cloudDialog = document.querySelector('#cloudDialog');
-const cloudDialogStatus = document.querySelector('#cloudDialogStatus');
-const cloudSaveList = document.querySelector('#cloudSaveList');
-const closeCloudBtn = document.querySelector('#closeCloudBtn');
-const layoutEditBtn = document.querySelector('#layoutEditBtn');
-const resetLayoutBtn = document.querySelector('#resetLayoutBtn');
-const closeSettingsBtn = document.querySelector('#closeSettingsBtn');
-const settingsModeText = document.querySelector('#settingsModeText');
-const layoutPresetButtons = document.querySelectorAll('[data-layout-scale]');
-const controlOpacityInput = document.querySelector('#controlOpacityInput');
-const controlOpacityValue = document.querySelector('#controlOpacityValue');
-const dpad = document.querySelector('#dpad');
-const actionZone = document.querySelector('.rightZone');
-const fullscreenBtn = document.querySelector('#fullscreenBtn');
-const netPerformanceHud = document.querySelector('#netPerformanceHud');
-const netModeSelect = document.querySelector('#netModeSelect');
+const dialogController = createDialogController({
+  settingsDialog,
+  dismissibleDialogs: [menuDialog, libraryDialog, cloudDialog],
+});
 
 const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
 if (!isStandalone) document.body.classList.add('browser-mode');
@@ -219,12 +153,6 @@ let stateCheckFrame = 0;
 let stateMismatchCount = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
-const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
-const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
-const NET_MODE_STORAGE_KEY = 'pwa-nes-net-mode-v1';
-const CLOUD_ACCESS_KEY_STORAGE_KEY = 'pwa-nes-cloud-access-key-v1';
-const CLOUD_AUTO_BACKUP_STORAGE_KEY = 'pwa-nes-cloud-auto-backup-v1';
-const CLOUD_DEVICE_ID_STORAGE_KEY = 'pwa-nes-cloud-device-id-v1';
 function getRuntimeRelayUrl() {
   try {
     const queryValue = new URLSearchParams(window.location.search).get('relay');
@@ -246,13 +174,36 @@ let audioL = null;
 let audioR = null;
 let streamAudioDestination = null;
 
-const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v2';
-const LEGACY_CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
-const CONTROL_OPACITY_STORAGE_KEY = 'pwa-nes-control-opacity-v1';
-const SAVE_STATE_STORAGE_KEY = 'pwa-nes-save-state-v1';
 
 function setStatus(text) {
   statusText.textContent = text;
+}
+
+function setButtonLabel(button, label) {
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  if (button.classList.contains('iconOnly') || button === fullscreenBtn) return;
+  const actionTitle = button.querySelector('.menuAction strong');
+  if (actionTitle) {
+    actionTitle.textContent = label;
+    return;
+  }
+  const labelNode = button.querySelector('.dynamicLabel') || document.createElement('span');
+  labelNode.className = 'dynamicLabel';
+  labelNode.textContent = label;
+  if (!labelNode.isConnected) {
+    Array.from(button.childNodes).forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) node.remove();
+    });
+    button.appendChild(labelNode);
+  }
+}
+
+function setButtonIcon(button, name, label) {
+  button.dataset.icon = name;
+  button.querySelector('svg')?.remove();
+  hydrateIcons(button);
+  setButtonLabel(button, label);
 }
 
 function getAdjustableControls() {
@@ -408,7 +359,7 @@ function positionScaleTools() {
 function setLayoutEditMode(enabled) {
   layoutEditMode = enabled;
   document.body.classList.toggle('layout-editing', enabled);
-  layoutEditBtn.textContent = enabled ? '完成调整' : '调整按键位置';
+  setButtonLabel(layoutEditBtn, enabled ? '完成调整' : '调整按键位置');
   settingsModeText.textContent = enabled
     ? `正在调整${getLayoutProfile() === 'landscape' ? '横屏' : '竖屏'}布局：拖动按键移动，选中后用 −/+ 或双指缩放，点空白保存。`
     : '横屏与竖屏布局会分别保存，不会互相影响。';
@@ -499,7 +450,7 @@ async function cloudFetch(pathname, options = {}) {
 }
 
 function updateCloudFavoriteButton() {
-  cloudFavoriteBtn.textContent = currentCloudFavorite ? '★ 已收藏当前游戏' : '☆ 收藏当前游戏';
+  setButtonLabel(cloudFavoriteBtn, currentCloudFavorite ? '已收藏当前游戏' : '收藏当前游戏');
   cloudFavoriteBtn.classList.toggle('active', currentCloudFavorite);
 }
 
@@ -545,7 +496,7 @@ async function loadCloudSave(id) {
   showGame();
   running = true;
   paused = false;
-  pauseBtn.textContent = '暂停';
+  setButtonIcon(pauseBtn, 'pause', '暂停');
   startLoop();
   cloudDialog.close();
   menuDialog.close();
@@ -642,7 +593,7 @@ function loadGameState() {
     showGame();
     running = true;
     paused = false;
-    pauseBtn.textContent = '暂停';
+    setButtonIcon(pauseBtn, 'pause', '暂停');
     setStatus('游戏已加载');
     menuDialog.close();
     if (networkRole === 'host' && peerConnected) sendPeerSnapshot();
@@ -1911,10 +1862,10 @@ async function applyPeerLibraryRom(message) {
 
 function updateNetworkButtons() {
   const active = networkRole !== 'offline';
-  if (netHostBtn) netHostBtn.textContent = networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间';
+  if (netHostBtn) setButtonLabel(netHostBtn, networkRole === 'host' && networkTransport === 'peer' && peerReady ? '直连房间已创建' : '创建直连房间');
   if (relayHostBtn) {
     relayHostBtn.classList.toggle('hidden', !RELAY_SERVER_URL);
-    relayHostBtn.textContent = networkRole === 'host' && networkTransport === 'relay' && relayReady ? '跨网房间已创建' : '创建跨网房间';
+    setButtonLabel(relayHostBtn, networkRole === 'host' && networkTransport === 'relay' && relayReady ? '跨网房间已创建' : '创建跨网房间');
     relayHostBtn.disabled = active || !RELAY_SERVER_URL;
     relayHostBtn.title = RELAY_SERVER_URL ? '使用私人公网中继建立跨网房间' : '公网中继尚未部署';
   }
@@ -2821,7 +2772,7 @@ async function lockLandscape() {
 
 function updateFullscreenButton() {
   const active = document.body.classList.contains('landscape-mode');
-  fullscreenBtn.textContent = active ? '×' : '⛶';
+  setButtonIcon(fullscreenBtn, active ? 'close' : 'expand', active ? '退出横屏' : '放大横屏');
   fullscreenBtn.setAttribute('aria-label', active ? '退出放大' : '放大横屏');
   fullscreenBtn.title = active ? '退出放大' : '放大横屏';
 }
@@ -2945,13 +2896,13 @@ function clearAudioBuffer() {
 
 function updateSoundButton() {
   if (isAuthoritativeStreamMode() && networkRole === 'guest' && !remoteStreamVideo.classList.contains('hidden')) {
-    soundBtn.textContent = remoteStreamAudio.muted || remoteStreamAudio.paused ? '开声' : '有声';
+    setButtonIcon(soundBtn, 'volume', remoteStreamAudio.muted || remoteStreamAudio.paused ? '开启声音' : '声音已开启');
     return;
   }
   if (!audioCtx) {
-    soundBtn.textContent = '开声';
+    setButtonIcon(soundBtn, 'volume', '开启声音');
   } else {
-    soundBtn.textContent = audioEnabled ? '有声' : '静音';
+    setButtonIcon(soundBtn, 'volume', audioEnabled ? '声音已开启' : '声音已关闭');
   }
 }
 
@@ -3113,7 +3064,7 @@ function startRom(romData, name = 'NES 游戏') {
     showGame();
     running = true;
     paused = false;
-    pauseBtn.textContent = '暂停';
+    setButtonIcon(pauseBtn, 'pause', '暂停');
     setStatus(`正在玩：${name}`);
     if (networkRole === 'host' && peerConnected && lastRomData && !isAuthoritativeStreamMode()) {
       sendCurrentRomToPeer();
@@ -3311,13 +3262,13 @@ pauseBtn.addEventListener('click', () => {
   if (paused) {
     running = true;
     paused = false;
-    pauseBtn.textContent = '暂停';
+    setButtonIcon(pauseBtn, 'pause', '暂停');
     setStatus(lastRomName ? `正在玩：${lastRomName}` : '继续');
     startLoop();
   } else {
     stopLoop();
     paused = true;
-    pauseBtn.textContent = '继续';
+    setButtonIcon(pauseBtn, 'play', '继续');
     setStatus('已暂停');
   }
 });
@@ -3339,37 +3290,16 @@ soundBtn.addEventListener('click', () => {
   }
 });
 
-function closeSettings() {
-  settingsDialog.removeAttribute('open');
-  document.body.classList.remove('settings-open');
-}
-
-function closeDialogFromBackdrop(event) {
-  const dialog = event.currentTarget;
-  if (event.target !== dialog) return;
-  const rect = dialog.getBoundingClientRect();
-  const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
-  if (!inside) dialog.close();
-}
-
 settingsBtn.addEventListener('click', () => {
   releaseAllButtons({ broadcast: true });
-  settingsDialog.setAttribute('open', '');
-  document.body.classList.add('settings-open');
+  dialogController.openSettings();
 });
-closeSettingsBtn.addEventListener('click', closeSettings);
-document.addEventListener('click', (event) => {
-  if (!settingsDialog.hasAttribute('open')) return;
-  if (event.target.closest?.('#settingsDialog, #settingsBtn')) return;
-  event.preventDefault();
-  event.stopPropagation();
-  closeSettings();
-}, true);
+closeSettingsBtn.addEventListener('click', dialogController.closeSettings);
 layoutEditBtn.addEventListener('click', () => {
   const nextMode = !layoutEditMode;
   setLayoutEditMode(nextMode);
   if (nextMode) {
-    closeSettings();
+    dialogController.closeSettings();
   }
 });
 resetLayoutBtn.addEventListener('click', resetControlLayout);
@@ -3377,12 +3307,6 @@ layoutPresetButtons.forEach((button) => {
   button.addEventListener('click', () => applyLayoutScalePreset(button.dataset.layoutScale));
 });
 controlOpacityInput.addEventListener('input', () => applyControlOpacity(controlOpacityInput.value));
-menuDialog.addEventListener('click', closeDialogFromBackdrop);
-libraryDialog.addEventListener('click', closeDialogFromBackdrop);
-cloudDialog.addEventListener('click', closeDialogFromBackdrop);
-window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && settingsDialog.hasAttribute('open')) closeSettings();
-});
 menuBtn.addEventListener('click', () => {
   releaseAllButtons({ broadcast: true });
   menuDialog.showModal();
@@ -3893,7 +3817,7 @@ document.addEventListener('visibilitychange', () => {
     if (running) {
       stopLoop();
       paused = true;
-      pauseBtn.textContent = '继续';
+      setButtonIcon(pauseBtn, 'play', '继续');
     }
     clearAudioBuffer();
     releaseAllButtons({ broadcast: true });

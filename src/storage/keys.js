@@ -1,0 +1,10 @@
+export const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
+export const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
+export const NET_MODE_STORAGE_KEY = 'pwa-nes-net-mode-v1';
+export const CLOUD_ACCESS_KEY_STORAGE_KEY = 'pwa-nes-cloud-access-key-v1';
+export const CLOUD_AUTO_BACKUP_STORAGE_KEY = 'pwa-nes-cloud-auto-backup-v1';
+export const CLOUD_DEVICE_ID_STORAGE_KEY = 'pwa-nes-cloud-device-id-v1';
+export const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v2';
+export const LEGACY_CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
+export const CONTROL_OPACITY_STORAGE_KEY = 'pwa-nes-control-opacity-v1';
+export const SAVE_STATE_STORAGE_KEY = 'pwa-nes-save-state-v1';
