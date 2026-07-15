@@ -9,7 +9,8 @@ import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELT
 import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
   GUEST_INPUT_MAX_LEAD_FRAMES, GUEST_INPUT_MAX_SAFETY_FRAMES, GUEST_INPUT_SAFETY_DECAY_MS,
-  NET_CLOCK_INTERVAL_MS, NETWORK_SYNC_TIMEOUT_MS, DEFAULT_NETWORK_RTT_MS,
+  NET_CLOCK_INTERVAL_MS, NETWORK_PING_IDLE_MS, NETWORK_PING_BOOTSTRAP_MS, NETWORK_PING_TIMEOUT_MS,
+  NETWORK_SYNC_TIMEOUT_MS, DEFAULT_NETWORK_RTT_MS,
   RELAY_MIN_JITTER_BUFFER_MS, RELAY_MAX_JITTER_BUFFER_MS, RELAY_MIN_GUEST_BUFFER_FRAMES,
   RELAY_MAX_GUEST_BUFFER_FRAMES, HOST_CLOCK_STALE_MS, GUEST_FAST_CATCHUP_THRESHOLD_FRAMES,
   GUEST_FAST_CATCHUP_MAX_FRAMES, LATE_INPUT_RESYNC_COOLDOWN_MS, ROLLBACK_SNAPSHOT_INTERVAL_FRAMES,
@@ -1346,6 +1347,23 @@ function getEstimatedHostFrame(now = performance.now()) {
   return hostClockFrame + (transitEstimate + clockAge) / FRAME_MS;
 }
 
+function acceptHostClock(frame, source = 'clock') {
+  const recoveredFromStall = networkTransportStalled;
+  const nextFrame = Number(frame);
+  if (Number.isFinite(nextFrame)) hostClockFrame = Math.max(0, nextFrame);
+  hostClockReceivedAt = performance.now();
+  if (!recoveredFromStall) return;
+  networkTransportStalled = false;
+  // A pong is also an authoritative host-frame sample. Handling recovery only
+  // for clock packets left the guest marked as stalled even after ping proved
+  // the relay route was healthy again.
+  networkRttMs = 0;
+  networkRttJitterMs = 0;
+  networkPingId = '';
+  logNetworkEvent('network-transport-recovered', { source, hostFrame: hostClockFrame, localFrame: gameFrame });
+  requestInitialStateSync('reconnect');
+}
+
 function recordNetworkRtt(sampleMs, source = 'ping') {
   const parsedSample = Number(sampleMs);
   if (!Number.isFinite(parsedSample) || parsedSample <= 0) return networkRttMs;
@@ -1956,6 +1974,7 @@ function cancelPendingDirectConnection() {
 function markNetworkConnected() {
   if (peerConnected) return;
   peerConnected = true;
+  networkHeartbeatTick();
   resetRollbackState({ capture: !isAuthoritativeStreamMode() && Boolean(nes) });
   flushPeerQueue();
   const route = networkTransport === 'relay' ? '私有中继' : 'WebRTC 直连';
@@ -2011,8 +2030,7 @@ function handleNetworkMessage(message) {
   if (message.type === 'pong' && networkRole === 'guest' && message.id === networkPingId) {
     const measuredRtt = Math.max(0, performance.now() - networkPingSentAt);
     networkPingId = '';
-    hostClockFrame = Number(message.frame) || hostClockFrame;
-    hostClockReceivedAt = performance.now();
+    acceptHostClock(message.frame, 'pong');
     recordNetworkRtt(measuredRtt);
     sendPeerMessage({ type: 'latency-report', rttMs: Math.round(networkRttMs) });
     return;
@@ -2165,19 +2183,7 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'clock' && networkRole === 'guest') {
-    const recoveredFromStall = networkTransportStalled;
-    hostClockFrame = Number(message.frame) || 0;
-    hostClockReceivedAt = performance.now();
-    if (recoveredFromStall) {
-      networkTransportStalled = false;
-      // Discard the outage RTT. Keeping a multi-second sample made later 2P
-      // controls remain delayed even after the Tailscale route was healthy.
-      networkRttMs = 0;
-      networkRttJitterMs = 0;
-      networkPingId = '';
-      logNetworkEvent('network-transport-recovered', { hostFrame: hostClockFrame, localFrame: gameFrame });
-      requestInitialStateSync('reconnect');
-    }
+    acceptHostClock(message.frame, 'clock');
     return;
   }
   if (message.type === 'rom-library' && networkRole === 'guest') {
@@ -3085,6 +3091,33 @@ function startLoop() {
   rafId = requestAnimationFrame(loop);
 }
 
+function networkHeartbeatTick() {
+  if (isAuthoritativeStreamMode() || !peerConnected || networkRole === 'offline') return;
+  const now = performance.now();
+  if (networkRole === 'host') {
+    if (now - lastNetworkClockAt < NET_CLOCK_INTERVAL_MS) return;
+    lastNetworkClockAt = now;
+    // This heartbeat must not depend on requestAnimationFrame. Browser UI,
+    // background transitions and a slow render frame may pause RAF even while
+    // the WebSocket and game session are still healthy.
+    sendPeerMessage({ type: 'clock', frame: gameFrame, running, paused });
+    return;
+  }
+  if (networkRole !== 'guest') return;
+  if (networkPingId && now - networkPingSentAt > NETWORK_PING_TIMEOUT_MS) {
+    logNetworkEvent('network-ping-timeout');
+    networkPingId = '';
+  }
+  const pingInterval = networkRttMs ? NETWORK_PING_IDLE_MS : NETWORK_PING_BOOTSTRAP_MS;
+  if (networkPingId || now - lastNetworkPingAt < pingInterval) return;
+  lastNetworkPingAt = now;
+  networkPingSentAt = now;
+  networkPingId = `${Math.round(now).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  sendPeerMessage({ type: 'ping', id: networkPingId });
+}
+
+window.setInterval(networkHeartbeatTick, NET_CLOCK_INTERVAL_MS);
+
 function stopLoop() {
   running = false;
   cancelAnimationFrame(rafId);
@@ -3190,21 +3223,6 @@ function loop(timestamp) {
   frameRemainder = elapsed;
   updatePerformanceHud(timestamp);
   lastTick = timestamp;
-  if (!isAuthoritativeStreamMode() && networkRole === 'host' && peerConnected && timestamp - lastNetworkClockAt >= NET_CLOCK_INTERVAL_MS) {
-    lastNetworkClockAt = timestamp;
-    sendPeerMessage({ type: 'clock', frame: gameFrame });
-  }
-  if (networkPingId && performance.now() - networkPingSentAt > 5000) {
-    logNetworkEvent('network-ping-timeout');
-    networkPingId = '';
-  }
-  const pingInterval = networkRttMs ? 2000 : 750;
-  if (!isAuthoritativeStreamMode() && networkRole === 'guest' && peerConnected && !networkPingId && timestamp - lastNetworkPingAt >= pingInterval) {
-    lastNetworkPingAt = timestamp;
-    networkPingSentAt = performance.now();
-    networkPingId = `${Math.round(networkPingSentAt).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    sendPeerMessage({ type: 'ping', id: networkPingId });
-  }
   rafId = requestAnimationFrame(loop);
 }
 
