@@ -3108,7 +3108,7 @@ function networkHeartbeatTick() {
     logNetworkEvent('network-ping-timeout');
     networkPingId = '';
     networkPingTimeoutCount++;
-    if (networkPingTimeoutCount >= 3 && reconnectRelayGuest('ping-timeout')) return;
+    if ((networkTransportStalled || networkPingTimeoutCount >= 3) && reconnectRelayGuest('ping-timeout')) return;
   }
   const pingInterval = networkRttMs ? NETWORK_PING_IDLE_MS : NETWORK_PING_BOOTSTRAP_MS;
   if (networkPingId || now - lastNetworkPingAt < pingInterval) return;
