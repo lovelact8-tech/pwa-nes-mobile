@@ -100,6 +100,27 @@
           </div>
         </section>
         <section class="menuSection">
+          <h3>私人云存档</h3>
+          <label class="cloudAccessRow" for="cloudAccessKey">
+            <span>访问码</span>
+            <input id="cloudAccessKey" type="password" autocomplete="off" placeholder="与私人联机访问码相同" />
+          </label>
+          <label class="cloudCheckRow">
+            <input id="cloudRememberKey" type="checkbox" checked />
+            <span>仅在本设备记住访问码</span>
+          </label>
+          <label class="cloudCheckRow">
+            <input id="cloudAutoBackup" type="checkbox" checked />
+            <span>本地保存时自动备份到私人云</span>
+          </label>
+          <div class="menuGrid">
+            <button id="cloudSaveBtn">上传当前进度</button>
+            <button id="cloudManageBtn">管理云存档</button>
+          </div>
+          <button id="cloudFavoriteBtn" class="cloudFavoriteBtn">☆ 收藏当前游戏</button>
+          <p id="cloudStatusText" class="networkStatus" role="status">尚未连接私人云</p>
+        </section>
+        <section class="menuSection">
           <h3>双人联机</h3>
           <div class="menuGrid">
             <button id="netHostBtn">创建直连房间</button>
@@ -141,6 +162,13 @@
         <p id="libraryStatusText" class="smallText">正在读取游戏目录...</p>
         <div id="libraryResults" class="libraryResults"></div>
         <button id="closeLibraryBtn">关闭</button>
+      </dialog>
+
+      <dialog id="cloudDialog" class="cloudDialog">
+        <h2>私人云存档</h2>
+        <p id="cloudDialogStatus" class="smallText">正在读取云存档...</p>
+        <div id="cloudSaveList" class="cloudSaveList"></div>
+        <button id="closeCloudBtn">关闭</button>
       </dialog>
 
       <dialog id="settingsDialog">

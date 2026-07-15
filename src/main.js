@@ -78,6 +78,17 @@ const netLinkInput = document.querySelector('#netLinkInput');
 const netStatusText = document.querySelector('#netStatusText');
 const netLogBtn = document.querySelector('#netLogBtn');
 const netLogOutput = document.querySelector('#netLogOutput');
+const cloudAccessKey = document.querySelector('#cloudAccessKey');
+const cloudRememberKey = document.querySelector('#cloudRememberKey');
+const cloudAutoBackup = document.querySelector('#cloudAutoBackup');
+const cloudSaveBtn = document.querySelector('#cloudSaveBtn');
+const cloudManageBtn = document.querySelector('#cloudManageBtn');
+const cloudFavoriteBtn = document.querySelector('#cloudFavoriteBtn');
+const cloudStatusText = document.querySelector('#cloudStatusText');
+const cloudDialog = document.querySelector('#cloudDialog');
+const cloudDialogStatus = document.querySelector('#cloudDialogStatus');
+const cloudSaveList = document.querySelector('#cloudSaveList');
+const closeCloudBtn = document.querySelector('#closeCloudBtn');
 const layoutEditBtn = document.querySelector('#layoutEditBtn');
 const resetLayoutBtn = document.querySelector('#resetLayoutBtn');
 const closeSettingsBtn = document.querySelector('#closeSettingsBtn');
@@ -98,6 +109,9 @@ let nes = null;
 let lastRomData = null;
 let lastRomName = '';
 let lastRomLibraryPath = '';
+let lastGameId = '';
+let currentCloudFavorite = false;
+let cloudPlayTimer = 0;
 let running = false;
 let paused = false;
 let rafId = 0;
@@ -199,6 +213,9 @@ const networkLogStartedAt = performance.now();
 const NETWORK_STORAGE_KEY = 'pwa-nes-network-room-v1';
 const RELAY_URL_STORAGE_KEY = 'pwa-nes-relay-url-v1';
 const NET_MODE_STORAGE_KEY = 'pwa-nes-net-mode-v1';
+const CLOUD_ACCESS_KEY_STORAGE_KEY = 'pwa-nes-cloud-access-key-v1';
+const CLOUD_AUTO_BACKUP_STORAGE_KEY = 'pwa-nes-cloud-auto-backup-v1';
+const CLOUD_DEVICE_ID_STORAGE_KEY = 'pwa-nes-cloud-device-id-v1';
 function getRuntimeRelayUrl() {
   try {
     const queryValue = new URLSearchParams(window.location.search).get('relay');
@@ -420,6 +437,166 @@ function getSaveStateKey() {
   return `${SAVE_STATE_STORAGE_KEY}:${lastRomName || 'default'}`;
 }
 
+function getCloudApiUrl(pathname) {
+  const url = normalizeRelayUrl(RELAY_SERVER_URL);
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+  url.pathname = pathname;
+  url.search = '';
+  return url;
+}
+
+function getCloudAccessKey() {
+  return String(cloudAccessKey?.value || '').trim();
+}
+
+function getCloudDeviceId() {
+  try {
+    let deviceId = localStorage.getItem(CLOUD_DEVICE_ID_STORAGE_KEY) || '';
+    if (!deviceId) {
+      deviceId = typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(CLOUD_DEVICE_ID_STORAGE_KEY, deviceId);
+    }
+    return deviceId;
+  } catch (error) {
+    return 'private-device';
+  }
+}
+
+async function getCurrentGameId() {
+  if (lastGameId) return lastGameId;
+  if (!lastRomData) throw new Error('请先加载游戏');
+  const digest = await crypto.subtle.digest('SHA-256', binaryStringToArrayBuffer(lastRomData));
+  lastGameId = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return lastGameId;
+}
+
+async function cloudFetch(pathname, options = {}) {
+  if (!RELAY_SERVER_URL) throw new Error('私人云服务器尚未配置');
+  const accessKey = getCloudAccessKey();
+  if (!accessKey) throw new Error('请先输入私人云访问码');
+  const response = await fetch(getCloudApiUrl(pathname), {
+    ...options,
+    headers: {
+      authorization: `Bearer ${accessKey}`,
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
+      ...options.headers,
+    },
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `私人云请求失败：${response.status}`);
+  return result;
+}
+
+function updateCloudFavoriteButton() {
+  cloudFavoriteBtn.textContent = currentCloudFavorite ? '★ 已收藏当前游戏' : '☆ 收藏当前游戏';
+  cloudFavoriteBtn.classList.toggle('active', currentCloudFavorite);
+}
+
+async function updateCloudLibraryActivity(value = {}) {
+  if (!lastRomData || !getCloudAccessKey()) return null;
+  const gameId = await getCurrentGameId();
+  const result = await cloudFetch(`/api/library/${gameId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ romName: lastRomName || 'NES 游戏', ...value }),
+  });
+  currentCloudFavorite = Boolean(result.favorite);
+  updateCloudFavoriteButton();
+  return result;
+}
+
+async function uploadCloudSave({ label = '手动存档', quiet = false } = {}) {
+  if (!nes) throw new Error('请先加载游戏');
+  if (!quiet) cloudStatusText.textContent = '正在上传云存档...';
+  const gameId = await getCurrentGameId();
+  const data = encodeNetworkState(nes.toJSON());
+  const result = await cloudFetch('/api/saves', {
+    method: 'POST',
+    body: JSON.stringify({
+      gameId,
+      romName: lastRomName || 'NES 游戏',
+      label,
+      data,
+      gameFrame,
+      deviceId: getCloudDeviceId(),
+    }),
+  });
+  cloudStatusText.textContent = `云存档已上传：${new Date(result.createdAt).toLocaleString('zh-CN')}`;
+  return result;
+}
+
+async function loadCloudSave(id) {
+  cloudDialogStatus.textContent = '正在下载并恢复云存档...';
+  const save = await cloudFetch(`/api/saves/${id}`);
+  releaseAllButtons();
+  nes.fromJSON(decodeNetworkState(save.data));
+  gameFrame = Math.max(0, Number(save.gameFrame) || 0);
+  resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
+  showGame();
+  running = true;
+  paused = false;
+  pauseBtn.textContent = '暂停';
+  startLoop();
+  cloudDialog.close();
+  menuDialog.close();
+  setStatus(`已恢复云存档：${save.label}`);
+  cloudStatusText.textContent = `已恢复：${new Date(save.createdAt).toLocaleString('zh-CN')}`;
+  if (networkRole === 'host' && peerConnected) sendPeerSnapshot();
+}
+
+function renderCloudSaves(saves) {
+  cloudSaveList.replaceChildren();
+  if (!saves.length) {
+    cloudDialogStatus.textContent = '当前游戏还没有云存档';
+    return;
+  }
+  cloudDialogStatus.textContent = `共 ${saves.length} 个版本，最多保留 20 个`;
+  for (const save of saves) {
+    const card = document.createElement('article');
+    card.className = 'cloudSaveCard';
+    const title = document.createElement('strong');
+    title.textContent = save.label || '云存档';
+    const meta = document.createElement('div');
+    meta.className = 'cloudSaveMeta';
+    meta.textContent = `${new Date(save.createdAt).toLocaleString('zh-CN')} · 帧 ${save.gameFrame || 0} · ${Math.max(1, Math.round((save.encodedBytes || 0) / 1024))}KB`;
+    const actions = document.createElement('div');
+    actions.className = 'cloudSaveActions';
+    const restoreButton = document.createElement('button');
+    restoreButton.textContent = '恢复此版本';
+    restoreButton.addEventListener('click', () => loadCloudSave(save.id).catch((error) => {
+      cloudDialogStatus.textContent = error.message || '恢复失败';
+    }));
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'deleteCloudSave';
+    deleteButton.textContent = '删除';
+    deleteButton.addEventListener('click', async () => {
+      if (!confirm(`确定删除“${save.label || '云存档'}”吗？`)) return;
+      try {
+        await cloudFetch(`/api/saves/${save.id}`, { method: 'DELETE' });
+        card.remove();
+        if (!cloudSaveList.children.length) cloudDialogStatus.textContent = '当前游戏还没有云存档';
+      } catch (error) {
+        cloudDialogStatus.textContent = error.message || '删除失败';
+      }
+    });
+    actions.append(restoreButton, deleteButton);
+    card.append(title, meta, actions);
+    cloudSaveList.append(card);
+  }
+}
+
+async function openCloudManager() {
+  if (!nes) throw new Error('请先加载游戏');
+  menuDialog.close();
+  cloudDialog.showModal();
+  cloudDialogStatus.textContent = '正在读取云存档...';
+  cloudSaveList.replaceChildren();
+  const gameId = await getCurrentGameId();
+  const result = await cloudFetch(`/api/saves?gameId=${encodeURIComponent(gameId)}`);
+  renderCloudSaves(result.saves || []);
+}
+
 function saveGameState() {
   if (!nes) {
     alert('请先加载游戏');
@@ -429,6 +606,11 @@ function saveGameState() {
     localStorage.setItem(getSaveStateKey(), JSON.stringify(nes.toJSON()));
     setStatus('游戏已保存');
     menuDialog.close();
+    if (cloudAutoBackup?.checked && getCloudAccessKey()) {
+      uploadCloudSave({ label: '自动备份', quiet: true }).catch((error) => {
+        cloudStatusText.textContent = `本地已保存，云备份失败：${error.message || '请重试'}`;
+      });
+    }
   } catch (error) {
     console.error(error);
     alert('保存失败，可能是浏览器存储空间不足。');
@@ -2822,6 +3004,9 @@ async function loadLibraryGame(game) {
 
 function startRom(romData, name = 'NES 游戏') {
   try {
+    lastGameId = '';
+    currentCloudFavorite = false;
+    updateCloudFavoriteButton();
     stopLoop();
     releaseAllButtons();
     clearAudioBuffer();
@@ -2847,6 +3032,7 @@ function startRom(romData, name = 'NES 游戏') {
       sendCurrentRomToPeer();
     }
     startLoop();
+    updateCloudLibraryActivity({ incrementPlay: true }).catch(() => {});
   } catch (error) {
     console.error(error);
     alert('加载失败：请确认这是标准 iNES 格式的 .nes 文件。');
@@ -3084,6 +3270,7 @@ layoutPresetButtons.forEach((button) => {
 controlOpacityInput.addEventListener('input', () => applyControlOpacity(controlOpacityInput.value));
 menuDialog.addEventListener('click', closeDialogFromBackdrop);
 libraryDialog.addEventListener('click', closeDialogFromBackdrop);
+cloudDialog.addEventListener('click', closeDialogFromBackdrop);
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && settingsDialog.hasAttribute('open')) closeSettings();
 });
@@ -3099,6 +3286,33 @@ resetBtn.addEventListener('click', () => {
 });
 saveStateBtn.addEventListener('click', saveGameState);
 loadStateBtn.addEventListener('click', loadGameState);
+cloudSaveBtn.addEventListener('click', () => {
+  uploadCloudSave().then(() => menuDialog.close()).catch((error) => {
+    cloudStatusText.textContent = error.message || '云存档上传失败';
+    if (!getCloudAccessKey()) cloudAccessKey.focus();
+  });
+});
+cloudManageBtn.addEventListener('click', () => {
+  openCloudManager().catch((error) => {
+    cloudStatusText.textContent = error.message || '无法读取云存档';
+    cloudDialog.close();
+    if (!getCloudAccessKey()) cloudAccessKey.focus();
+  });
+});
+cloudFavoriteBtn.addEventListener('click', () => {
+  if (!nes) {
+    cloudStatusText.textContent = '请先加载游戏';
+    return;
+  }
+  const nextFavorite = !currentCloudFavorite;
+  updateCloudLibraryActivity({ favorite: nextFavorite }).then(() => {
+    cloudStatusText.textContent = nextFavorite ? '已收藏当前游戏' : '已取消收藏';
+  }).catch((error) => {
+    cloudStatusText.textContent = error.message || '收藏状态同步失败';
+    if (!getCloudAccessKey()) cloudAccessKey.focus();
+  });
+});
+closeCloudBtn.addEventListener('click', () => cloudDialog.close());
 netHostBtn.addEventListener('click', () => {
   createPeerRoom();
   refreshInviteLink();
@@ -3586,6 +3800,37 @@ window.addEventListener('pagehide', () => releaseAllButtons({ broadcast: true })
 readControlOffsets();
 applyControlOffsets();
 applyControlOpacity(localStorage.getItem(CONTROL_OPACITY_STORAGE_KEY) || 90);
+try {
+  cloudAccessKey.value = localStorage.getItem(CLOUD_ACCESS_KEY_STORAGE_KEY) || '';
+  cloudRememberKey.checked = Boolean(cloudAccessKey.value);
+  cloudAutoBackup.checked = localStorage.getItem(CLOUD_AUTO_BACKUP_STORAGE_KEY) !== '0';
+} catch (error) {
+  cloudRememberKey.checked = false;
+}
+cloudAccessKey.addEventListener('change', () => {
+  try {
+    if (cloudRememberKey.checked && getCloudAccessKey()) localStorage.setItem(CLOUD_ACCESS_KEY_STORAGE_KEY, getCloudAccessKey());
+    else localStorage.removeItem(CLOUD_ACCESS_KEY_STORAGE_KEY);
+  } catch (error) { /* ignore private mode */ }
+  cloudStatusText.textContent = getCloudAccessKey() ? '访问码已设置，可上传或管理云存档' : '尚未连接私人云';
+});
+cloudRememberKey.addEventListener('change', () => {
+  try {
+    if (cloudRememberKey.checked && getCloudAccessKey()) localStorage.setItem(CLOUD_ACCESS_KEY_STORAGE_KEY, getCloudAccessKey());
+    else localStorage.removeItem(CLOUD_ACCESS_KEY_STORAGE_KEY);
+  } catch (error) { /* ignore private mode */ }
+});
+cloudAutoBackup.addEventListener('change', () => {
+  try { localStorage.setItem(CLOUD_AUTO_BACKUP_STORAGE_KEY, cloudAutoBackup.checked ? '1' : '0'); } catch (error) { /* ignore private mode */ }
+});
+if (getCloudAccessKey()) cloudStatusText.textContent = '访问码已保存，可使用私人云存档';
+updateCloudFavoriteButton();
+clearInterval(cloudPlayTimer);
+cloudPlayTimer = window.setInterval(() => {
+  if (running && !paused && nes && getCloudAccessKey()) {
+    updateCloudLibraryActivity({ addPlaySeconds: 300 }).catch(() => {});
+  }
+}, 300_000);
 if (netModeSelect) {
   try {
     netModeSelect.value = localStorage.getItem(NET_MODE_STORAGE_KEY) === 'stream' ? 'stream' : 'rollback';

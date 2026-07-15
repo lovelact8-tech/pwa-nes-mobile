@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket } from 'ws';
 
 const port = 18787;
@@ -8,6 +11,7 @@ const accessKey = 'test-access-key-only';
 const tokenSecret = 'test-signing-secret-at-least-32-characters';
 const turnSecret = 'test-turn-shared-secret-at-least-32-characters';
 const turnUrl = 'turn:100.125.58.33:3478?transport=udp';
+const cloudDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pwa-nes-cloud-test-'));
 const server = spawn(process.execPath, ['relay-server/server.mjs'], {
   cwd: process.cwd(),
   env: {
@@ -17,6 +21,7 @@ const server = spawn(process.execPath, ['relay-server/server.mjs'], {
     RELAY_TOKEN_SECRET: tokenSecret,
     TURN_SHARED_SECRET: turnSecret,
     TURN_URLS: turnUrl,
+    CLOUD_DATA_DIR: cloudDataDir,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -34,6 +39,42 @@ await new Promise((resolve, reject) => {
 
 const room = `test-${Date.now()}`;
 const origin = 'https://lovelact8-tech.github.io';
+const cloudHeaders = { origin, authorization: `Bearer ${accessKey}`, 'content-type': 'application/json' };
+const rejectedCloudResponse = await fetch(`http://127.0.0.1:${port}/api/status`, {
+  headers: { origin, authorization: 'Bearer wrong-access-key' },
+});
+assert.equal(rejectedCloudResponse.status, 401);
+const cloudStatusResponse = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: cloudHeaders });
+assert.equal(cloudStatusResponse.status, 200);
+assert.equal((await cloudStatusResponse.json()).cloudSaves, true);
+
+const gameId = crypto.createHash('sha256').update('test-rom').digest('hex');
+const saveData = Buffer.from('compressed-state').toString('base64');
+const createSaveResponse = await fetch(`http://127.0.0.1:${port}/api/saves`, {
+  method: 'POST',
+  headers: cloudHeaders,
+  body: JSON.stringify({ gameId, romName: '测试游戏.nes', label: '自动测试', data: saveData, gameFrame: 42, deviceId: 'test-device' }),
+});
+assert.equal(createSaveResponse.status, 201);
+const createdSave = await createSaveResponse.json();
+assert.ok(createdSave.id);
+assert.equal(createdSave.data, undefined);
+const listSaveResponse = await fetch(`http://127.0.0.1:${port}/api/saves?gameId=${gameId}`, { headers: cloudHeaders });
+assert.equal(listSaveResponse.status, 200);
+assert.equal((await listSaveResponse.json()).saves.length, 1);
+const getSaveResponse = await fetch(`http://127.0.0.1:${port}/api/saves/${createdSave.id}`, { headers: cloudHeaders });
+assert.equal(getSaveResponse.status, 200);
+assert.equal((await getSaveResponse.json()).data, saveData);
+const libraryResponse = await fetch(`http://127.0.0.1:${port}/api/library/${gameId}`, {
+  method: 'PUT',
+  headers: cloudHeaders,
+  body: JSON.stringify({ romName: '测试游戏.nes', favorite: true, incrementPlay: true, addPlaySeconds: 60 }),
+});
+assert.equal(libraryResponse.status, 200);
+const libraryItem = await libraryResponse.json();
+assert.equal(libraryItem.favorite, true);
+assert.equal(libraryItem.playCount, 1);
+assert.equal(libraryItem.playSeconds, 60);
 const rejectedTicketResponse = await fetch(`http://127.0.0.1:${port}/ticket`, {
   method: 'POST',
   headers: { origin, 'content-type': 'application/json' },
@@ -94,4 +135,5 @@ assert.deepEqual(await romPromise, rom);
 host.close();
 guest.close();
 server.kill('SIGTERM');
+fs.rmSync(cloudDataDir, { recursive: true, force: true });
 console.log('Relay TURN credentials, text, and binary forwarding passed');

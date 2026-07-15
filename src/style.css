@@ -119,6 +119,18 @@ dialog button { width: 100%; background: rgba(255,255,255,.13); margin: 5px 0; }
 .relayAccessRow input { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 11px; background: rgba(3,7,18,.55); color: #fff; user-select: text; -webkit-user-select: text; touch-action: manipulation; }
 .netModeRow { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin: 9px 0; color: #cbd5e1; font-size: 12px; font-weight: 700; }
 .netModeRow select { width: 100%; min-height: 40px; padding: 8px 30px 8px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 11px; background: #111827; color: #fff; font: inherit; }
+.cloudAccessRow { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin: 4px 0 8px; color: #cbd5e1; font-size: 12px; font-weight: 700; }
+.cloudAccessRow input { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 11px; background: rgba(3,7,18,.55); color: #fff; user-select: text; -webkit-user-select: text; }
+.cloudCheckRow { display: flex; align-items: center; gap: 8px; margin: 7px 0; color: #cbd5e1; font-size: 12px; }
+.cloudCheckRow input { width: 18px; height: 18px; accent-color: #3b82f6; }
+.cloudSaveList { display: grid; gap: 8px; margin: 10px 0 14px; }
+.cloudSaveCard { padding: 11px; border: 1px solid rgba(255,255,255,.11); border-radius: 13px; background: rgba(255,255,255,.045); }
+.cloudSaveCard strong { display: block; margin-bottom: 4px; color: #fff; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloudSaveMeta { color: #94a3b8; font-size: 11px; line-height: 1.5; }
+.cloudSaveActions { display: grid; grid-template-columns: 1fr 76px; gap: 7px; margin-top: 8px; }
+.cloudSaveActions button { min-height: 38px; margin: 0; padding: 7px; border-radius: 10px; font-size: 12px; }
+.cloudSaveActions .deleteCloudSave { background: rgba(190,18,60,.2); color: #fecdd3; }
+.cloudFavoriteBtn { min-height: 40px; margin: 8px 0 0; padding: 8px; border-radius: 11px; color: #fde68a; }
 .layoutPresetGroup { margin: 12px 0 6px; }
 .layoutPresetGroup > .smallText { display: block; margin-bottom: 6px; }
 .layoutPresets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

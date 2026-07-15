@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
+import { createCloudStore } from './cloud-store.mjs';
 
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 8787);
@@ -12,6 +13,7 @@ const tokenSecret = process.env.RELAY_TOKEN_SECRET || '';
 const turnSharedSecret = process.env.TURN_SHARED_SECRET || '';
 const turnUrls = (process.env.TURN_URLS || '').split(',').map((value) => value.trim()).filter(Boolean);
 const turnCredentialTtlSeconds = Math.max(600, Math.min(86_400, Number(process.env.TURN_CREDENTIAL_TTL_SECONDS || 7200)));
+const cloudDataDir = String(process.env.CLOUD_DATA_DIR || '').trim();
 const ticketTtlSeconds = Math.max(300, Math.min(86_400, Number(process.env.TICKET_TTL_SECONDS || 7200)));
 const allowedOrigins = new Set(
   (process.env.ALLOWED_ORIGINS || 'https://lovelact8-tech.github.io,http://localhost:5173,http://127.0.0.1:5173')
@@ -22,6 +24,7 @@ const allowedOrigins = new Set(
 const rooms = new Map();
 const connectionCounts = new Map();
 const ticketAttempts = new Map();
+const cloudStore = cloudDataDir ? createCloudStore(cloudDataDir) : null;
 
 if (relayAccessKey.length < 16 || tokenSecret.length < 32) {
   console.error('RELAY_ACCESS_KEY must be at least 16 characters and RELAY_TOKEN_SECRET at least 32 characters');
@@ -110,6 +113,102 @@ function writeJson(response, status, value, origin = '') {
   response.end(JSON.stringify(value));
 }
 
+function readJsonBody(request, maxBytes = 2_000_000) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > maxBytes) {
+        reject(new Error('请求数据过大'));
+        request.destroy();
+      }
+    });
+    request.on('end', () => {
+      try {
+        resolve(JSON.parse(body || '{}'));
+      } catch (error) {
+        reject(new Error('请求格式错误'));
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
+function handleCloudApi(request, response, origin) {
+  const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+  if (!url.pathname.startsWith('/api/')) return false;
+  if (!allowedOrigins.has(origin)) {
+    writeJson(response, 403, { error: '来源不允许' });
+    return true;
+  }
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, {
+      'access-control-allow-origin': origin,
+      'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'access-control-allow-headers': 'authorization, content-type',
+      'access-control-max-age': '600',
+      vary: 'Origin',
+    });
+    response.end();
+    return true;
+  }
+  const authorization = String(request.headers.authorization || '');
+  const accessKey = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  if (!accessKey || !secretsEqual(accessKey, relayAccessKey)) {
+    writeJson(response, 401, { error: '私人云访问码错误' }, origin);
+    return true;
+  }
+  if (!cloudStore) {
+    writeJson(response, 503, { error: '私人云存档尚未启用' }, origin);
+    return true;
+  }
+
+  const saveMatch = url.pathname.match(/^\/api\/saves\/(\d+)$/);
+  const libraryMatch = url.pathname.match(/^\/api\/library\/([a-f0-9]{64})$/);
+  try {
+    if (url.pathname === '/api/status' && request.method === 'GET') {
+      writeJson(response, 200, { ok: true, cloudSaves: true }, origin);
+      return true;
+    }
+    if (url.pathname === '/api/saves' && request.method === 'GET') {
+      writeJson(response, 200, { saves: cloudStore.listSaves(url.searchParams.get('gameId')) }, origin);
+      return true;
+    }
+    if (saveMatch && request.method === 'GET') {
+      const save = cloudStore.getSave(saveMatch[1]);
+      writeJson(response, save ? 200 : 404, save || { error: '云存档不存在' }, origin);
+      return true;
+    }
+    if (saveMatch && request.method === 'DELETE') {
+      const deleted = cloudStore.deleteSave(saveMatch[1]);
+      writeJson(response, deleted ? 200 : 404, deleted ? { ok: true } : { error: '云存档不存在' }, origin);
+      return true;
+    }
+    if (url.pathname === '/api/library' && request.method === 'GET') {
+      writeJson(response, 200, { games: cloudStore.listLibrary() }, origin);
+      return true;
+    }
+    if (url.pathname === '/api/saves' && request.method === 'POST') {
+      readJsonBody(request).then((body) => {
+        const save = cloudStore.createSave(body);
+        const { data, ...metadata } = save;
+        writeJson(response, 201, metadata, origin);
+      }).catch((error) => writeJson(response, 400, { error: error.message || '保存失败' }, origin));
+      return true;
+    }
+    if (libraryMatch && request.method === 'PUT') {
+      readJsonBody(request, 16_384).then((body) => {
+        writeJson(response, 200, cloudStore.updateLibrary(libraryMatch[1], body), origin);
+      }).catch((error) => writeJson(response, 400, { error: error.message || '更新失败' }, origin));
+      return true;
+    }
+    writeJson(response, 404, { error: '接口不存在' }, origin);
+  } catch (error) {
+    writeJson(response, 400, { error: error.message || '请求失败' }, origin);
+  }
+  return true;
+}
+
 function removeSocket(socket) {
   if (socket.countedIp) {
     const nextCount = Math.max(0, (connectionCounts.get(socket.countedIp) || 1) - 1);
@@ -133,6 +232,7 @@ const server = http.createServer((request, response) => {
     writeJson(response, 200, { ok: true });
     return;
   }
+  if (handleCloudApi(request, response, origin)) return;
   if (request.url === '/ticket' && request.method === 'OPTIONS') {
     if (!allowedOrigins.has(origin)) {
       writeJson(response, 403, { error: 'Forbidden' });
@@ -277,7 +377,10 @@ server.listen(port, host, () => {
 function shutdown() {
   clearInterval(heartbeat);
   for (const socket of relay.clients) socket.close(1001, '服务器关闭');
-  server.close(() => process.exit(0));
+  server.close(() => {
+    cloudStore?.close();
+    process.exit(0);
+  });
 }
 
 process.on('SIGINT', shutdown);
