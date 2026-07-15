@@ -13,26 +13,30 @@ const MAX_PEER_QUEUE_SIZE = 32;
 // transitions before both peers execute them on the same emulation frame.
 const NET_INPUT_DELAY_FRAMES = 1;
 const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
-const GUEST_INPUT_MAX_LEAD_FRAMES = 6;
+const GUEST_INPUT_MAX_LEAD_FRAMES = 3;
 const NET_CLOCK_INTERVAL_MS = 100;
 const NETWORK_SYNC_TIMEOUT_MS = 30000;
 // Relay guests intentionally run a little behind the host so authoritative
 // inputs arrive before the guest reaches their frame. Keep this buffer small:
 // Tailscale can begin on DERP and switch to a much faster direct route later.
 const DEFAULT_NETWORK_RTT_MS = 250;
-const RELAY_MIN_JITTER_BUFFER_MS = 20;
-const RELAY_MAX_JITTER_BUFFER_MS = 75;
-const RELAY_MIN_GUEST_BUFFER_FRAMES = 3;
+const RELAY_MIN_JITTER_BUFFER_MS = 8;
+const RELAY_MAX_JITTER_BUFFER_MS = 50;
+const RELAY_MIN_GUEST_BUFFER_FRAMES = 2;
 // A large playback lead hides jitter but makes 2P feel like a delayed video.
 // Rollback absorbs short spikes, so keep the normal Tailscale path responsive.
-const RELAY_MAX_GUEST_BUFFER_FRAMES = 12;
+const RELAY_MAX_GUEST_BUFFER_FRAMES = 4;
+// A stale host clock must never be extrapolated indefinitely. Mobile VPNs can
+// briefly keep a WebSocket open while no packets are delivered; continuing the
+// emulator in that state creates two permanently different matches.
+const HOST_CLOCK_STALE_MS = 750;
 const GUEST_FAST_CATCHUP_THRESHOLD_FRAMES = 12;
 const GUEST_FAST_CATCHUP_MAX_FRAMES = 6;
 const LATE_INPUT_RESYNC_COOLDOWN_MS = 5000;
 const ROLLBACK_SNAPSHOT_INTERVAL_FRAMES = 8;
 const ROLLBACK_WINDOW_FRAMES = 128;
 const ROLLBACK_MAX_SNAPSHOTS = Math.ceil(ROLLBACK_WINDOW_FRAMES / ROLLBACK_SNAPSHOT_INTERVAL_FRAMES) + 2;
-const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 320;
+const NETWORK_STATE_CHECK_INTERVAL_FRAMES = 160;
 
 const landing = document.querySelector('#landing');
 const game = document.querySelector('#game');
@@ -171,6 +175,7 @@ let lastQueuedLocalButtons = new Set();
 let lastNetworkClockAt = 0;
 let hostClockFrame = null;
 let hostClockReceivedAt = 0;
+let networkTransportStalled = false;
 let lastStateRequestAt = 0;
 let networkSyncPaused = false;
 let networkSyncId = '';
@@ -701,6 +706,8 @@ function getNetworkDiagnosticLog() {
     `stateMismatchCount=${stateMismatchCount}`,
     `gameFrame=${gameFrame}`,
     `hostFrame=${hostClockFrame ?? 'none'}`,
+    `hostClockAgeMs=${hostClockReceivedAt ? Math.round(performance.now() - hostClockReceivedAt) : 'none'}`,
+    `transportStalled=${networkTransportStalled}`,
     `userAgent=${navigator.userAgent}`,
     '',
     ...networkLogEntries,
@@ -1347,7 +1354,10 @@ function sendPeerButtons(player, buttons) {
   const leadFrames = Math.max(GUEST_INPUT_MIN_LEAD_FRAMES, Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames));
   const frame = Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
   const order = ++networkEventOrder;
-  scheduleNetworkInput(player, nextButtons, frame, { id, order });
+  // While the host clock is unavailable, retain immediate touch feedback but
+  // do not advance a speculative game timeline. The host still receives the
+  // input and its authoritative snapshot is applied when delivery resumes.
+  if (!networkTransportStalled) scheduleNetworkInput(player, nextButtons, frame, { id, order });
   logNetworkEvent('input-send', {
     role: 'guest',
     player,
@@ -1357,7 +1367,7 @@ function sendPeerButtons(player, buttons) {
     estimatedHostFrame: Math.round(estimatedHostFrame),
     leadFrames,
     id,
-    predicted: true,
+    predicted: !networkTransportStalled,
   });
   sendPeerMessage({ type: 'input-request', player, buttons: nextButtons, frame, id });
 }
@@ -1371,7 +1381,10 @@ function getNetworkInputDelayFrames() {
 function getEstimatedHostFrame(now = performance.now()) {
   if (hostClockFrame === null) return gameFrame + getRelayGuestBufferFrames();
   const transitEstimate = networkRttMs > 0 ? networkRttMs / 2 : 0;
-  return hostClockFrame + (transitEstimate + now - hostClockReceivedAt) / FRAME_MS;
+  // Never invent seconds of host progress from an old clock sample. The loop
+  // freezes the guest and performs a state sync when delivery resumes.
+  const clockAge = Math.max(0, Math.min(HOST_CLOCK_STALE_MS, now - hostClockReceivedAt));
+  return hostClockFrame + (transitEstimate + clockAge) / FRAME_MS;
 }
 
 function recordNetworkRtt(sampleMs, source = 'ping') {
@@ -1778,7 +1791,9 @@ function requestInitialStateSync(reason = 'initial') {
     ? '检测到网络抖动，正在恢复画面同步...'
     : reason === 'desync'
       ? '检测到状态差异，正在恢复权威进度...'
-      : '游戏已加载，正在同步 1P 进度...';
+      : reason === 'reconnect'
+        ? '网络已恢复，正在重新同步 1P 进度...'
+        : '游戏已加载，正在同步 1P 进度...';
   setNetworkText(statusText);
   logNetworkEvent('state-request-sent', { syncId, reason });
   sendPeerMessage({ type: 'state-request', syncId });
@@ -1894,6 +1909,8 @@ function teardownPeerConnection(finalStatus = '') {
   peerPendingMessages = [];
   resetRollbackState();
   hostClockFrame = null;
+  hostClockReceivedAt = 0;
+  networkTransportStalled = false;
   lastStateRequestAt = 0;
   clearNetworkSync();
   lastNetworkClockAt = 0;
@@ -2142,8 +2159,19 @@ function handleNetworkMessage(message) {
     return;
   }
   if (message.type === 'clock' && networkRole === 'guest') {
+    const recoveredFromStall = networkTransportStalled;
     hostClockFrame = Number(message.frame) || 0;
     hostClockReceivedAt = performance.now();
+    if (recoveredFromStall) {
+      networkTransportStalled = false;
+      // Discard the outage RTT. Keeping a multi-second sample made later 2P
+      // controls remain delayed even after the Tailscale route was healthy.
+      networkRttMs = 0;
+      networkRttJitterMs = 0;
+      networkPingId = '';
+      logNetworkEvent('network-transport-recovered', { hostFrame: hostClockFrame, localFrame: gameFrame });
+      requestInitialStateSync('reconnect');
+    }
     return;
   }
   if (message.type === 'rom-library' && networkRole === 'guest') {
@@ -3016,6 +3044,8 @@ function startRom(romData, name = 'NES 游戏') {
     resetRollbackState({ capture: true });
     lastQueuedLocalButtons = new Set();
     hostClockFrame = null;
+    hostClockReceivedAt = 0;
+    networkTransportStalled = false;
     lastStateRequestAt = 0;
     for (const player of [1, 2]) {
       for (const buttonName of buttonStateByPlayer[player]) {
@@ -3057,6 +3087,28 @@ function loop(timestamp) {
   if (!running || !nes) return;
 
   if (!isAuthoritativeStreamMode()) flushPendingNetworkRollback();
+
+  if (!isAuthoritativeStreamMode()
+    && networkRole === 'guest'
+    && peerConnected
+    && hostClockFrame !== null
+    && hostClockReceivedAt
+    && timestamp - hostClockReceivedAt > HOST_CLOCK_STALE_MS) {
+    if (!networkTransportStalled) {
+      networkTransportStalled = true;
+      logNetworkEvent('network-transport-stalled', {
+        clockAgeMs: Math.round(timestamp - hostClockReceivedAt),
+        hostFrame: hostClockFrame,
+        localFrame: gameFrame,
+      });
+      setNetworkText('网络暂时中断，已冻结画面以防双方进度分叉...');
+    }
+    lastTick = timestamp;
+    frameRemainder = 0;
+    updatePerformanceHud(timestamp);
+    rafId = requestAnimationFrame(loop);
+    return;
+  }
 
   if (networkSyncPaused) {
     lastTick = timestamp;
