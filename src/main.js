@@ -4,7 +4,12 @@ import Peer from 'peerjs';
 import { gzipSync, gunzipSync, strFromU8, strToU8, unzipSync } from 'fflate';
 import { ui } from './ui/dom.js';
 import { hydrateIcons } from './ui/icons.js';
+import { setButtonIcon, setButtonLabel } from './ui/buttons.js';
 import { createDialogController } from './ui/dialogs.js';
+import { createFullscreenController } from './ui/fullscreen.js';
+import { createControlLayoutController } from './input/control-layout.js';
+import { createInputController } from './input/controller.js';
+import { registerServiceWorker } from './pwa/register.js';
 import {
   captureDeterministicState,
   restoreDeterministicState,
@@ -15,6 +20,9 @@ import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
+import { createAudioController } from './emulator/audio.js';
+import { getRuntimeRelayUrl } from './netplay/relay-url.js';
+import { createAuthoritativeStreamSession } from './netplay/authoritative-stream.js';
 import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
   GUEST_INPUT_MAX_LEAD_FRAMES, GUEST_INPUT_MAX_SAFETY_FRAMES, GUEST_INPUT_SAFETY_DECAY_MS,
@@ -27,9 +35,8 @@ import {
   ROLLBACK_WINDOW_FRAMES, ROLLBACK_MAX_SNAPSHOTS, NETWORK_STATE_CHECK_INTERVAL_FRAMES,
 } from './netplay/constants.js';
 import {
-  NETWORK_STORAGE_KEY, RELAY_URL_STORAGE_KEY, NET_MODE_STORAGE_KEY, CLOUD_ACCESS_KEY_STORAGE_KEY,
-  CLOUD_AUTO_BACKUP_STORAGE_KEY, CLOUD_DEVICE_ID_STORAGE_KEY, CONTROL_LAYOUT_STORAGE_KEY,
-  LEGACY_CONTROL_LAYOUT_STORAGE_KEY, CONTROL_OPACITY_STORAGE_KEY, SAVE_STATE_STORAGE_KEY,
+  NETWORK_STORAGE_KEY, NET_MODE_STORAGE_KEY, CLOUD_ACCESS_KEY_STORAGE_KEY,
+  CLOUD_AUTO_BACKUP_STORAGE_KEY, CLOUD_DEVICE_ID_STORAGE_KEY, SAVE_STATE_STORAGE_KEY,
 } from './storage/keys.js';
 
 hydrateIcons();
@@ -68,16 +75,8 @@ let paused = false;
 let rafId = 0;
 let lastTick = 0;
 let frameRemainder = 0;
-let dpadPointerId = null;
-let actionPointerId = null;
-let layoutEditMode = false;
-let fallbackFullscreen = false;
-let controlOffsets = {};
-let selectedControlKey = null;
-let selectedControlElement = null;
-let scaleTools = null;
 const buttonStateByPlayer = { 1: new Set(), 2: new Set() };
-const localSourceStates = { keyboard: new Set(), dpad: new Set(), action: new Set() };
+let controllerInput = null;
 let localPlayer = 1;
 let remotePlayer = 2;
 let networkRole = 'offline';
@@ -145,21 +144,6 @@ let lastNetworkPingAt = 0;
 let networkPingTimeoutCount = 0;
 let lastGuestCatchUpLogAt = 0;
 let lastLateInputResyncAt = 0;
-let streamPeerConnection = null;
-let streamInputChannel = null;
-let streamLocalMedia = null;
-let streamRemoteMedia = null;
-let streamRemoteAudioMedia = null;
-let streamPendingIce = [];
-let streamInputSequence = 0;
-let streamLastRemoteInputSequence = 0;
-let streamInputHeartbeat = 0;
-let streamConnectTimeout = 0;
-let streamGuestWasRunning = false;
-let streamFirstFrameReady = false;
-let streamReadySent = false;
-let streamStatsTimer = 0;
-let streamStatsSummary = null;
 let performanceHudLastAt = 0;
 let performanceHudFrames = 0;
 let performanceHudFps = 0;
@@ -168,250 +152,61 @@ let stateCheckFrame = 0;
 let stateMismatchCount = 0;
 const networkLogEntries = [];
 const networkLogStartedAt = performance.now();
-function getRuntimeRelayUrl() {
-  try {
-    const queryValue = new URLSearchParams(window.location.search).get('relay');
-    if (queryValue?.trim()) return queryValue.trim();
-    // The deployed private relay is authoritative. Old Quick Tunnel/VPS URLs
-    // stored by earlier builds must not silently override it on one device.
-    const deployedValue = String(import.meta.env.VITE_RELAY_URL || '').trim();
-    if (deployedValue) return deployedValue;
-    return localStorage.getItem(RELAY_URL_STORAGE_KEY)?.trim() || '';
-  } catch (error) {
-    return '';
-  }
-}
 const RELAY_SERVER_URL = getRuntimeRelayUrl();
-
-let audioCtx = null;
-let scriptNode = null;
-let audioEnabled = false;
-let audioRead = 0;
-let audioWrite = 0;
-let audioCount = 0;
-let audioResampleAccumulator = 0;
-let audioL = null;
-let audioR = null;
-let streamAudioDestination = null;
+const audio = createAudioController({
+  onStatus: setStatus,
+  onChange: updateSoundButton,
+  getSourceSampleRate: () => nes?.papu?.sampleRate,
+});
+const initAudio = () => audio.init();
+const clearAudioBuffer = () => audio.clear();
+const pushAudioSample = (left, right) => audio.pushSample(left, right);
+const streamSession = createAuthoritativeStreamSession({
+  canvas,
+  remoteVideo: remoteStreamVideo,
+  remoteAudio: remoteStreamAudio,
+  audio,
+  getTurnConfig: () => relayTurnConfig,
+  getRole: () => networkRole,
+  isEnabled: isAuthoritativeStreamMode,
+  isPeerConnected: () => peerConnected,
+  getLocalButtons: getLocalMergedButtons,
+  getRunning: () => running,
+  hasNes: () => Boolean(nes),
+  setRunning: (value) => { running = value; },
+  stopLoop,
+  startLoop,
+  showGame,
+  setPlayerButtons,
+  sendMessage: sendPeerMessage,
+  setStatus: setNetworkText,
+  log: logNetworkEvent,
+  updateHud: updatePerformanceHud,
+  updateSound: updateSoundButton,
+});
 
 
 function setStatus(text) {
   statusText.textContent = text;
 }
 
-function setButtonLabel(button, label) {
-  button.setAttribute('aria-label', label);
-  button.setAttribute('title', label);
-  if (button.classList.contains('iconOnly') || button === fullscreenBtn) return;
-  const actionTitle = button.querySelector('.menuAction strong');
-  if (actionTitle) {
-    actionTitle.textContent = label;
-    return;
-  }
-  const labelNode = button.querySelector('.dynamicLabel') || document.createElement('span');
-  labelNode.className = 'dynamicLabel';
-  labelNode.textContent = label;
-  if (!labelNode.isConnected) {
-    Array.from(button.childNodes).forEach((node) => {
-      if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) node.remove();
-    });
-    button.appendChild(labelNode);
-  }
-}
+const controlLayout = createControlLayoutController({
+  dpad,
+  game,
+  layoutEditBtn,
+  layoutPresetButtons,
+  controlOpacityInput,
+  controlOpacityValue,
+  settingsModeText,
+  releaseAllButtons: (...args) => releaseAllButtons(...args),
+});
+const applyControlOffsets = controlLayout.apply;
+const applyControlOpacity = controlLayout.applyOpacity;
+const applyLayoutScalePreset = controlLayout.applyScalePreset;
+const positionScaleTools = controlLayout.positionTools;
+const resetControlLayout = controlLayout.reset;
+const setLayoutEditMode = controlLayout.setEditMode;
 
-function setButtonIcon(button, name, label) {
-  button.dataset.icon = name;
-  button.querySelector('svg')?.remove();
-  hydrateIcons(button);
-  setButtonLabel(button, label);
-}
-
-function getAdjustableControls() {
-  return [dpad, ...document.querySelectorAll('[data-btn]')];
-}
-
-function getLayoutProfile() {
-  return document.body.classList.contains('landscape-mode') || window.matchMedia('(orientation: landscape)').matches
-    ? 'landscape'
-    : 'portrait';
-}
-
-function getBaseControlKey(element) {
-  if (element === dpad) return 'dpad';
-  return `button-${element.dataset.btn}`;
-}
-
-function getControlKey(element) {
-  return `${getLayoutProfile()}:${getBaseControlKey(element)}`;
-}
-
-function normalizeControlOffset(value = {}) {
-  const numberOr = (candidate, fallback) => Number.isFinite(Number(candidate)) ? Number(candidate) : fallback;
-  return {
-    x: Math.max(-900, Math.min(900, numberOr(value.x, 0))),
-    y: Math.max(-900, Math.min(900, numberOr(value.y, 0))),
-    scale: Math.max(0.65, Math.min(1.8, numberOr(value.scale, 1))),
-  };
-}
-
-function readControlOffsets() {
-  try {
-    const saved = localStorage.getItem(CONTROL_LAYOUT_STORAGE_KEY);
-    const parsed = JSON.parse(saved || '{}');
-    if (parsed && typeof parsed === 'object') {
-      controlOffsets = Object.fromEntries(
-        Object.entries(parsed).map(([key, value]) => [key, normalizeControlOffset(value)])
-      );
-    }
-    if (!saved) {
-      const legacy = JSON.parse(localStorage.getItem(LEGACY_CONTROL_LAYOUT_STORAGE_KEY) || '{}');
-      if (legacy && typeof legacy === 'object') {
-        for (const [key, value] of Object.entries(legacy)) {
-          controlOffsets[`portrait:${key}`] = normalizeControlOffset(value);
-          controlOffsets[`landscape:${key}`] = normalizeControlOffset(value);
-        }
-        saveControlOffsets();
-      }
-    }
-  } catch (error) {
-    controlOffsets = {};
-  }
-}
-
-function applyControlOpacity(value) {
-  const percent = Math.max(45, Math.min(100, Number(value) || 90));
-  document.documentElement.style.setProperty('--control-opacity', String(percent / 100));
-  controlOpacityInput.value = String(percent);
-  controlOpacityValue.textContent = `${percent}%`;
-  try {
-    localStorage.setItem(CONTROL_OPACITY_STORAGE_KEY, String(percent));
-  } catch (error) {
-    console.warn(error);
-  }
-}
-
-function saveControlOffsets() {
-  try {
-    localStorage.setItem(CONTROL_LAYOUT_STORAGE_KEY, JSON.stringify(controlOffsets));
-  } catch (error) {
-    console.warn(error);
-  }
-}
-
-function applyControlOffsets() {
-  const scales = [];
-  for (const element of getAdjustableControls()) {
-    const key = getControlKey(element);
-    const offset = normalizeControlOffset(controlOffsets[key]);
-    controlOffsets[key] = offset;
-    element.style.setProperty('--drag-x', `${offset.x}px`);
-    element.style.setProperty('--drag-y', `${offset.y}px`);
-    element.style.setProperty('--control-scale', `${offset.scale}`);
-    element.classList.toggle('selected-control', key === selectedControlKey);
-    scales.push(offset.scale);
-  }
-  const commonScale = scales.length && scales.every((scale) => scale === scales[0]) ? scales[0] : null;
-  layoutPresetButtons.forEach((button) => {
-    button.classList.toggle('active', commonScale !== null && Number(button.dataset.layoutScale) === commonScale);
-  });
-}
-
-function selectControl(element) {
-  selectedControlKey = getControlKey(element);
-  selectedControlElement = element;
-  applyControlOffsets();
-  positionScaleTools();
-}
-
-function scaleSelectedControl(delta) {
-  if (!selectedControlKey) return;
-  const offset = controlOffsets[selectedControlKey] || { x: 0, y: 0, scale: 1 };
-  const nextScale = Math.min(1.8, Math.max(0.65, (Number(offset.scale) || 1) + delta));
-  controlOffsets[selectedControlKey] = { ...offset, scale: Number(nextScale.toFixed(2)) };
-  applyControlOffsets();
-  saveControlOffsets();
-  positionScaleTools();
-}
-
-function ensureScaleTools() {
-  if (scaleTools) return scaleTools;
-  scaleTools = document.createElement('div');
-  scaleTools.className = 'scaleTools hidden';
-  scaleTools.innerHTML = '<button type="button" data-scale="-">−</button><button type="button" data-scale="+">+</button>';
-  document.body.appendChild(scaleTools);
-  scaleTools.addEventListener('pointerdown', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-  });
-  scaleTools.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-scale]');
-    if (!button) return;
-    event.preventDefault();
-    event.stopPropagation();
-    scaleSelectedControl(button.dataset.scale === '+' ? 0.1 : -0.1);
-  });
-  return scaleTools;
-}
-
-function hideScaleTools() {
-  scaleTools?.classList.add('hidden');
-}
-
-function positionScaleTools() {
-  if (!layoutEditMode || !selectedControlElement) {
-    hideScaleTools();
-    return;
-  }
-  const tools = ensureScaleTools();
-  const rect = selectedControlElement.getBoundingClientRect();
-  if (isRotatedLandscapeFallback()) {
-    tools.style.left = `${Math.min(window.innerWidth - 44, rect.right + 10)}px`;
-    tools.style.top = `${Math.max(48, Math.min(window.innerHeight - 48, rect.top + rect.height / 2))}px`;
-    tools.classList.add('rotated');
-  } else {
-    tools.style.left = `${rect.left + rect.width / 2}px`;
-    tools.style.top = `${Math.max(8, rect.top - 44)}px`;
-    tools.classList.remove('rotated');
-  }
-  tools.classList.remove('hidden');
-}
-
-function setLayoutEditMode(enabled) {
-  layoutEditMode = enabled;
-  document.body.classList.toggle('layout-editing', enabled);
-  setButtonLabel(layoutEditBtn, enabled ? '完成调整' : '调整按键位置');
-  settingsModeText.textContent = enabled
-    ? `正在调整${getLayoutProfile() === 'landscape' ? '横屏' : '竖屏'}布局：拖动按键移动，选中后用 −/+ 或双指缩放，点空白保存。`
-    : '横屏与竖屏布局会分别保存，不会互相影响。';
-  if (!enabled) {
-    selectedControlKey = null;
-    selectedControlElement = null;
-    hideScaleTools();
-  }
-  applyControlOffsets();
-  releaseAllButtons();
-}
-
-function resetControlLayout() {
-  controlOffsets = {};
-  saveControlOffsets();
-  applyControlOffsets();
-  layoutPresetButtons.forEach((button) => button.classList.toggle('active', button.dataset.layoutScale === '1'));
-}
-
-function applyLayoutScalePreset(scale) {
-  const nextScale = Math.min(1.8, Math.max(0.65, Number(scale) || 1));
-  for (const element of getAdjustableControls()) {
-    const key = getControlKey(element);
-    const offset = controlOffsets[key] || { x: 0, y: 0 };
-    controlOffsets[key] = { ...offset, scale: nextScale };
-  }
-  saveControlOffsets();
-  applyControlOffsets();
-  layoutPresetButtons.forEach((button) => {
-    button.classList.toggle('active', Number(button.dataset.layoutScale) === nextScale);
-  });
-}
 
 function getSaveStateKey() {
   return `${SAVE_STATE_STORAGE_KEY}:${lastRomName || 'default'}`;
@@ -649,6 +444,7 @@ function logNetworkEvent(event, detail = {}) {
 
 function getNetworkDiagnosticLog() {
   const roomHint = roomId ? `${roomId.slice(0, 4)}…${roomId.slice(-4)}` : 'none';
+  const streamStatus = streamSession.getStatus();
   return [
     'PWA NES 联机诊断日志',
     `time=${new Date().toISOString()}`,
@@ -663,11 +459,11 @@ function getNetworkDiagnosticLog() {
     `peerConnected=${peerConnected}`,
     `relayReady=${relayReady}`,
     `relaySocket=${relaySocket?.readyState ?? 'none'}`,
-    `streamPeer=${streamPeerConnection?.connectionState || 'none'}`,
-    `streamIce=${streamPeerConnection?.iceConnectionState || 'none'}`,
-    `streamInput=${streamInputChannel?.readyState || 'none'}`,
+    `streamPeer=${streamStatus.peer}`,
+    `streamIce=${streamStatus.ice}`,
+    `streamInput=${streamStatus.input}`,
     `streamVideo=${remoteStreamVideo?.readyState ?? 'none'}`,
-    `streamStats=${streamStatsSummary ? JSON.stringify(streamStatsSummary) : 'none'}`,
+    `streamStats=${streamStatus.stats ? JSON.stringify(streamStatus.stats) : 'none'}`,
     `syncPaused=${networkSyncPaused}`,
     `syncPending=${stateRequestInFlight || Boolean(networkSyncId)}`,
     `rttMs=${Math.round(networkRttMs)}`,
@@ -724,11 +520,12 @@ function updatePerformanceHud(timestamp = performance.now()) {
     performanceHudLastAt = timestamp;
   }
   const streamMode = isAuthoritativeStreamMode();
-  const fps = streamMode ? Number(streamStatsSummary?.fps) || 0 : performanceHudFps;
-  const rtt = streamMode ? Number(streamStatsSummary?.rttMs) || 0 : Math.round(networkRttMs);
-  const buffer = streamMode ? Number(streamStatsSummary?.playoutMs) || 0 : getRelayGuestBufferFrames();
+  const streamStatus = streamSession.getStatus();
+  const fps = streamMode ? Number(streamStatus.stats?.fps) || 0 : performanceHudFps;
+  const rtt = streamMode ? Number(streamStatus.stats?.rttMs) || 0 : Math.round(networkRttMs);
+  const buffer = streamMode ? Number(streamStatus.stats?.playoutMs) || 0 : getRelayGuestBufferFrames();
   const bufferLabel = streamMode ? `${buffer}ms` : `${buffer}f`;
-  const sync = streamMode ? streamPeerConnection?.connectionState || '连接中' : `${stateCheckStatus}@${stateCheckFrame || '-'}`;
+  const sync = streamMode ? streamStatus.peer || '连接中' : `${stateCheckStatus}@${stateCheckFrame || '-'}`;
   netPerformanceHud.textContent = `${streamMode ? '串流' : '回滚'}  FPS ${fps || '--'}  RTT ${rtt || '--'}ms  缓冲 ${bufferLabel}  回滚 ${rollbackCount}/${rollbackFrames}f  同步 ${sync}`;
   const unhealthy = (fps > 0 && fps < 48) || rtt > 350 || stateCheckStatus === '差异';
   const warning = !unhealthy && ((fps > 0 && fps < 56) || rtt > 180 || (!streamMode && getRelayGuestBufferFrames() > 8));
@@ -741,349 +538,14 @@ function isAuthoritativeStreamMode() {
   return networkPlayMode === 'stream' && networkTransport === 'relay';
 }
 
-function getStreamRtcConfig() {
-  const privateTurn = relayTurnConfig?.urls?.length && relayTurnConfig.username && relayTurnConfig.credential
-    ? [{ urls: relayTurnConfig.urls, username: relayTurnConfig.username, credential: relayTurnConfig.credential }]
-    : [];
-  return {
-    iceServers: [
-      ...privateTurn,
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      { urls: 'stun:stun.l.google.com:19302' },
-    ],
-    bundlePolicy: 'max-bundle',
-    iceCandidatePoolSize: 4,
-  };
-}
-
-function maybeMarkRemoteStreamReady() {
-  if (streamReadySent || !streamFirstFrameReady || streamPeerConnection?.connectionState !== 'connected') return;
-  streamReadySent = true;
-  const audioMuted = remoteStreamAudio.muted || remoteStreamAudio.paused;
-  setNetworkText(audioMuted ? '权威画面已同步，点一下手柄开启声音' : '已进入 1P 权威画面，2P 手柄可操作');
-  sendPeerMessage({ type: 'stream-ready', muted: audioMuted });
-  logNetworkEvent('stream-first-frame', { muted: audioMuted, width: remoteStreamVideo.videoWidth, height: remoteStreamVideo.videoHeight });
-}
-
-function armRemoteFirstFrameCheck() {
-  const markReady = () => {
-    streamFirstFrameReady = true;
-    maybeMarkRemoteStreamReady();
-  };
-  if (typeof remoteStreamVideo.requestVideoFrameCallback === 'function') {
-    remoteStreamVideo.requestVideoFrameCallback(markReady);
-  } else {
-    remoteStreamVideo.addEventListener('loadeddata', markReady, { once: true });
-  }
-}
-
-function sendStreamInput(buttons = getLocalMergedButtons(), { quiet = false } = {}) {
-  if (!isAuthoritativeStreamMode() || networkRole !== 'guest') return;
-  const message = {
-    type: 'stream-input',
-    player: 2,
-    buttons: Array.from(buttons || []),
-    sequence: ++streamInputSequence,
-    heartbeat: quiet,
-  };
-  const payload = JSON.stringify(message);
-  if (streamInputChannel?.readyState === 'open') {
-    streamInputChannel.send(payload);
-    if (!quiet) logNetworkEvent('stream-input-send', { via: 'datachannel', sequence: message.sequence, buttons: message.buttons });
-  } else {
-    sendPeerMessage(message);
-    if (!quiet) logNetworkEvent('stream-input-send', { via: 'relay', sequence: message.sequence, buttons: message.buttons });
-  }
-}
-
-function applyStreamRemoteInput(message) {
-  if (!isAuthoritativeStreamMode() || networkRole !== 'host') return;
-  const sequence = Math.max(0, Math.floor(Number(message.sequence) || 0));
-  if (sequence && sequence <= streamLastRemoteInputSequence) return;
-  if (sequence) streamLastRemoteInputSequence = sequence;
-  setPlayerButtons(2, new Set(message.buttons || []), { broadcast: false });
-  if (!message.heartbeat) logNetworkEvent('stream-input-received', { sequence, buttons: message.buttons || [] });
-}
-
-function configureStreamInputChannel(channel) {
-  streamInputChannel = channel;
-  channel.onopen = () => {
-    logNetworkEvent('stream-input-open', { role: networkRole });
-    if (networkRole === 'guest') {
-      sendStreamInput();
-      clearInterval(streamInputHeartbeat);
-      streamInputHeartbeat = window.setInterval(() => sendStreamInput(getLocalMergedButtons(), { quiet: true }), 100);
-    }
-  };
-  channel.onmessage = (event) => {
-    try {
-      const message = JSON.parse(String(event.data || ''));
-      if (message.type === 'stream-input') applyStreamRemoteInput(message);
-    } catch (error) {
-      logNetworkEvent('stream-input-error', { message: error?.message || String(error) });
-    }
-  };
-  channel.onclose = () => {
-    logNetworkEvent('stream-input-close', { role: networkRole });
-    clearInterval(streamInputHeartbeat);
-    streamInputHeartbeat = 0;
-    if (networkRole === 'host') setPlayerButtons(2, new Set(), { broadcast: false });
-  };
-}
-
-function showRemoteStream(stream) {
-  streamRemoteMedia = stream;
-  streamGuestWasRunning = streamGuestWasRunning || running;
-  if (running) stopLoop();
-  showGame();
-  remoteStreamVideo.srcObject = stream;
-  remoteStreamVideo.muted = true;
-  remoteStreamVideo.classList.remove('hidden');
-  updateSoundButton();
-  armRemoteFirstFrameCheck();
-  remoteStreamVideo.play().catch(() => {
-    setNetworkText('正在等待 1P 权威画面，请点一下手柄继续');
-  });
-}
-
-function attachRemoteAudio(track) {
-  streamRemoteAudioMedia = new MediaStream([track]);
-  remoteStreamAudio.srcObject = streamRemoteAudioMedia;
-  remoteStreamAudio.muted = false;
-  remoteStreamAudio.play().then(updateSoundButton).catch(() => {
-    remoteStreamAudio.muted = true;
-    updateSoundButton();
-  });
-}
-
-function unlockRemoteStreamAudio(event) {
-  if (networkRole !== 'guest' || remoteStreamVideo.classList.contains('hidden')) return;
-  if (event?.target?.closest?.('#soundBtn')) return;
-  remoteStreamAudio.muted = false;
-  updateSoundButton();
-  remoteStreamAudio.play().then(() => {
-    setNetworkText('已进入 1P 权威画面，2P 手柄可操作');
-  }).catch(() => {});
-}
-
-async function collectStreamStats() {
-  if (!streamPeerConnection || streamPeerConnection.connectionState !== 'connected') return;
-  try {
-    const reports = await streamPeerConnection.getStats();
-    const byId = new Map();
-    reports.forEach((report) => byId.set(report.id, report));
-    const summary = { role: networkRole };
-    reports.forEach((report) => {
-      if (report.type === 'inbound-rtp' && report.kind === 'video') {
-        summary.fps = Math.round(Number(report.framesPerSecond) || 0);
-        summary.decoded = Number(report.framesDecoded) || 0;
-        summary.dropped = Number(report.framesDropped) || 0;
-        summary.jitterMs = Math.round((Number(report.jitter) || 0) * 1000);
-        const emitted = Number(report.jitterBufferEmittedCount) || 0;
-        summary.playoutMs = emitted ? Math.round((Number(report.jitterBufferDelay) || 0) * 1000 / emitted) : 0;
-      }
-      if (report.type === 'outbound-rtp' && report.kind === 'video') {
-        summary.fps = Math.round(Number(report.framesPerSecond) || 0);
-        summary.sent = Number(report.framesSent) || 0;
-        summary.quality = report.qualityLimitationReason || 'none';
-      }
-      if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
-        summary.rttMs = Math.round((Number(report.currentRoundTripTime) || 0) * 1000);
-        summary.availableKbps = Math.round((Number(report.availableOutgoingBitrate) || Number(report.availableIncomingBitrate) || 0) / 1000);
-        summary.localCandidate = byId.get(report.localCandidateId)?.candidateType || '';
-        summary.remoteCandidate = byId.get(report.remoteCandidateId)?.candidateType || '';
-      }
-    });
-    streamStatsSummary = summary;
-    updatePerformanceHud();
-  } catch (error) {
-    logNetworkEvent('stream-stats-error', { message: error?.message || String(error) });
-  }
-}
-
-function createStreamPeerConnection() {
-  const connection = new RTCPeerConnection(getStreamRtcConfig());
-  streamPeerConnection = connection;
-  streamPendingIce = [];
-  connection.onicecandidate = (event) => {
-    if (!event.candidate) return;
-    sendPeerMessage({ type: 'stream-ice', candidate: event.candidate.toJSON?.() || event.candidate });
-  };
-  connection.oniceconnectionstatechange = () => {
-    logNetworkEvent('stream-ice-state', { state: connection.iceConnectionState });
-  };
-  connection.onconnectionstatechange = () => {
-    logNetworkEvent('stream-peer-state', { state: connection.connectionState });
-    if (connection.connectionState === 'connected') {
-      clearTimeout(streamConnectTimeout);
-      streamConnectTimeout = 0;
-      maybeMarkRemoteStreamReady();
-      clearInterval(streamStatsTimer);
-      collectStreamStats();
-      streamStatsTimer = window.setInterval(collectStreamStats, 3000);
-    } else if (['failed', 'disconnected'].includes(connection.connectionState)) {
-      setNetworkText('权威串流连接中断，请重新加入房间');
-    }
-  };
-  if (networkRole === 'guest') {
-    connection.ondatachannel = (event) => configureStreamInputChannel(event.channel);
-    connection.ontrack = (event) => {
-      try {
-        if ('playoutDelayHint' in event.receiver) event.receiver.playoutDelayHint = 0;
-        if ('jitterBufferTarget' in event.receiver) event.receiver.jitterBufferTarget = 0;
-      } catch (error) {
-        // These low-latency receiver hints are optional and browser-specific.
-      }
-      if (event.track.kind === 'video') {
-        const stream = new MediaStream([event.track]);
-        showRemoteStream(stream);
-      } else if (event.track.kind === 'audio') {
-        attachRemoteAudio(event.track);
-      }
-      logNetworkEvent('stream-track-received', { kind: event.track.kind });
-    };
-  }
-  return connection;
-}
-
-async function flushStreamIce() {
-  if (!streamPeerConnection?.remoteDescription) return;
-  const candidates = streamPendingIce.splice(0);
-  for (const candidate of candidates) {
-    try {
-      await streamPeerConnection.addIceCandidate(candidate);
-    } catch (error) {
-      logNetworkEvent('stream-ice-add-error', { message: error?.message || String(error) });
-    }
-  }
-}
-
-async function startHostAuthoritativeStream() {
-  if (!isAuthoritativeStreamMode() || networkRole !== 'host' || !peerConnected) return;
-  if (!window.RTCPeerConnection || typeof canvas.captureStream !== 'function') {
-    setNetworkText('当前 1P 浏览器不支持权威画面串流，请使用新版 Safari/Chrome');
-    return;
-  }
-  teardownStreamSession({ restoreLocalGame: false });
-  initAudio();
-  const connection = createStreamPeerConnection();
-  // Each packet is a complete controller state. Unordered/unreliable delivery
-  // avoids head-of-line stalls, while the 100 ms state heartbeat repairs a
-  // dropped release without adding input latency.
-  configureStreamInputChannel(connection.createDataChannel('nes-input', { ordered: false, maxRetransmits: 0 }));
-  streamLocalMedia = canvas.captureStream(60);
-  const videoTrack = streamLocalMedia.getVideoTracks()[0];
-  if (videoTrack) {
-    videoTrack.contentHint = 'motion';
-    const sender = connection.addTrack(videoTrack, streamLocalMedia);
-    const transceiver = connection.getTransceivers().find((candidate) => candidate.sender === sender);
-    const codecs = window.RTCRtpSender?.getCapabilities?.('video')?.codecs || [];
-    const h264 = codecs.filter((codec) => codec.mimeType?.toLowerCase() === 'video/h264');
-    if (transceiver?.setCodecPreferences && h264.length) {
-      transceiver.setCodecPreferences([...h264, ...codecs.filter((codec) => !h264.includes(codec))]);
-    }
-    const parameters = sender.getParameters();
-    if (!parameters.encodings?.length) parameters.encodings = [{}];
-    parameters.encodings[0].maxBitrate = 800_000;
-    parameters.encodings[0].maxFramerate = 60;
-    parameters.degradationPreference = 'maintain-framerate';
-    sender.setParameters(parameters)
-      .then(() => logNetworkEvent('stream-video-parameters', { maxBitrate: 800000, maxFramerate: 60, codec: h264.length ? 'H264-first' : 'browser-default' }))
-      .catch((error) => logNetworkEvent('stream-video-parameters-error', { message: error?.message || String(error) }));
-  }
-  for (const track of streamAudioDestination?.stream?.getAudioTracks?.() || []) {
-    streamLocalMedia.addTrack(track);
-    connection.addTrack(track, streamLocalMedia);
-  }
-  const offer = await connection.createOffer();
-  await connection.setLocalDescription(offer);
-  sendPeerMessage({ type: 'stream-offer', description: connection.localDescription });
-  setNetworkText('2P 已连接，正在建立 1P 权威画面...');
-  logNetworkEvent('stream-offer-send', { tracks: streamLocalMedia.getTracks().map((track) => track.kind) });
-  clearTimeout(streamConnectTimeout);
-  streamConnectTimeout = window.setTimeout(() => {
-    if (streamPeerConnection?.connectionState !== 'connected') {
-      setNetworkText('权威串流未能直连；需要为路由器补充私人 TURN');
-      logNetworkEvent('stream-connect-timeout', { ice: streamPeerConnection?.iceConnectionState || 'none' });
-    }
-  }, 10000);
-}
-
-async function acceptHostStreamOffer(message) {
-  if (!isAuthoritativeStreamMode() || networkRole !== 'guest') return;
-  if (!window.RTCPeerConnection) {
-    setNetworkText('当前 2P 浏览器不支持权威画面串流');
-    return;
-  }
-  const earlyIce = streamPendingIce.slice();
-  teardownStreamSession({ restoreLocalGame: false });
-  const connection = createStreamPeerConnection();
-  streamPendingIce = earlyIce;
-  await connection.setRemoteDescription(message.description);
-  await flushStreamIce();
-  const answer = await connection.createAnswer();
-  await connection.setLocalDescription(answer);
-  sendPeerMessage({ type: 'stream-answer', description: connection.localDescription });
-  setNetworkText('已连接房间，正在接收 1P 权威画面...');
-  logNetworkEvent('stream-answer-send');
-}
-
-async function acceptGuestStreamAnswer(message) {
-  if (!isAuthoritativeStreamMode() || networkRole !== 'host' || !streamPeerConnection) return;
-  await streamPeerConnection.setRemoteDescription(message.description);
-  await flushStreamIce();
-  logNetworkEvent('stream-answer-received');
-}
-
-function addStreamIceCandidate(message) {
-  if (!isAuthoritativeStreamMode() || !message.candidate) return;
-  const candidate = new RTCIceCandidate(message.candidate);
-  if (!streamPeerConnection?.remoteDescription) streamPendingIce.push(candidate);
-  else streamPeerConnection.addIceCandidate(candidate).catch((error) => {
-    logNetworkEvent('stream-ice-add-error', { message: error?.message || String(error) });
-  });
-}
-
-function teardownStreamSession({ restoreLocalGame = true } = {}) {
-  clearTimeout(streamConnectTimeout);
-  streamConnectTimeout = 0;
-  clearInterval(streamInputHeartbeat);
-  streamInputHeartbeat = 0;
-  clearInterval(streamStatsTimer);
-  streamStatsTimer = 0;
-  streamStatsSummary = null;
-  if (streamInputChannel) {
-    streamInputChannel.onclose = null;
-    streamInputChannel.close?.();
-  }
-  streamInputChannel = null;
-  streamPeerConnection?.close?.();
-  streamPeerConnection = null;
-  streamLocalMedia?.getVideoTracks?.().forEach((track) => track.stop());
-  streamLocalMedia = null;
-  streamRemoteMedia = null;
-  streamRemoteAudioMedia = null;
-  streamPendingIce = [];
-  streamInputSequence = 0;
-  streamLastRemoteInputSequence = 0;
-  streamFirstFrameReady = false;
-  streamReadySent = false;
-  if (remoteStreamVideo) {
-    remoteStreamVideo.pause?.();
-    remoteStreamVideo.srcObject = null;
-    remoteStreamVideo.classList.add('hidden');
-  }
-  if (remoteStreamAudio) {
-    remoteStreamAudio.pause?.();
-    remoteStreamAudio.srcObject = null;
-    remoteStreamAudio.muted = true;
-  }
-  if (restoreLocalGame && streamGuestWasRunning && nes && !running) {
-    running = true;
-    startLoop();
-  }
-  streamGuestWasRunning = false;
-}
+const sendStreamInput = (...args) => streamSession.sendInput(...args);
+const applyStreamRemoteInput = (...args) => streamSession.applyRemoteInput(...args);
+const startHostAuthoritativeStream = (...args) => streamSession.startHost(...args);
+const acceptHostStreamOffer = (...args) => streamSession.acceptOffer(...args);
+const acceptGuestStreamAnswer = (...args) => streamSession.acceptAnswer(...args);
+const addStreamIceCandidate = (...args) => streamSession.addIce(...args);
+const teardownStreamSession = (...args) => streamSession.teardown(...args);
+const unlockRemoteStreamAudio = (...args) => streamSession.unlockAudio(...args);
 
 function getInviteUrl() {
   if (!roomId) return '';
@@ -1110,29 +572,11 @@ function refreshInviteLink() {
 }
 
 function getLocalMergedButtons() {
-  return new Set([...localSourceStates.keyboard, ...localSourceStates.dpad, ...localSourceStates.action]);
+  return controllerInput?.getButtons() || new Set();
 }
 
 function syncButtonVisuals() {
-  // The on-screen controller is local feedback. Remote input must not light it.
-  const activeButtons = getLocalMergedButtons();
-  document.querySelectorAll('[data-btn]').forEach((element) => {
-    const active = element.dataset.btn === 'AB'
-      ? activeButtons.has('A') && activeButtons.has('B')
-      : activeButtons.has(element.dataset.btn);
-    element.classList.toggle('active', active);
-  });
-  document.querySelectorAll('.padVisual').forEach((element) => {
-    element.classList.remove('active');
-  });
-  let dpadActive = false;
-  for (const name of ['UP', 'DOWN', 'LEFT', 'RIGHT']) {
-    if (activeButtons.has(name)) {
-      dpadActive = true;
-      document.querySelector(`.padVisual.${name.toLowerCase()}`)?.classList.add('active');
-    }
-  }
-  dpad.classList.toggle('active', dpadActive);
+  controllerInput?.syncVisuals();
 }
 
 function setPlayerButtons(player, nextButtons, { broadcast = false } = {}) {
@@ -1172,9 +616,7 @@ function updateLocalPlayerState({ broadcast = true } = {}) {
 }
 
 function clearLocalSourceStates() {
-  localSourceStates.keyboard.clear();
-  localSourceStates.dpad.clear();
-  localSourceStates.action.clear();
+  controllerInput?.clear({ notifyChange: false });
   updateLocalPlayerState({ broadcast: false });
 }
 
@@ -2792,25 +2234,6 @@ function restoreNetworkRoom() {
   updateNetworkButtons();
 }
 
-function getFullscreenElement() {
-  return document.fullscreenElement || document.webkitFullscreenElement || null;
-}
-
-function requestGameFullscreen() {
-  const request = game.requestFullscreen || game.webkitRequestFullscreen;
-  if (!request) return Promise.reject(new Error('Fullscreen is not supported'));
-  return Promise.resolve(request.call(game));
-}
-
-async function lockLandscape() {
-  try {
-    await screen.orientation?.lock?.('landscape');
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
 function updateFullscreenButton() {
   const active = document.body.classList.contains('landscape-mode');
   setButtonIcon(fullscreenBtn, active ? 'close' : 'expand', active ? '退出横屏' : '放大横屏');
@@ -2823,117 +2246,16 @@ function finishFullscreenTransition() {
   positionScaleTools();
   updateFullscreenButton();
 }
-
-async function exitGameFullscreen() {
-  fallbackFullscreen = false;
-  document.body.classList.remove('fullscreen-mode', 'landscape-mode');
-  screen.orientation?.unlock?.();
-  const exit = document.exitFullscreen || document.webkitExitFullscreen;
-  if (getFullscreenElement() && exit) {
-    try {
-      await Promise.resolve(exit.call(document));
-    } catch (error) {
-      console.warn(error);
-    }
-  }
-  finishFullscreenTransition();
-}
-
-async function toggleGameFullscreen() {
-  if (document.body.classList.contains('landscape-mode')) {
-    await exitGameFullscreen();
-    return;
-  }
-
-  try {
-    await requestGameFullscreen();
-    fallbackFullscreen = false;
-  } catch (error) {
-    fallbackFullscreen = true;
-  }
-  document.body.classList.add('fullscreen-mode');
-  document.body.classList.add('landscape-mode');
-
-  const locked = await lockLandscape();
-  finishFullscreenTransition();
-  if (!locked) setStatus('已进入横屏模式');
-}
-
-function handleFullscreenChange() {
-  if (!getFullscreenElement() && !fallbackFullscreen && document.body.classList.contains('landscape-mode')) {
-    document.body.classList.remove('fullscreen-mode', 'landscape-mode');
-    screen.orientation?.unlock?.();
-  }
-  finishFullscreenTransition();
-}
+const fullscreen = createFullscreenController({
+  game,
+  onStatus: setStatus,
+  onTransition: finishFullscreenTransition,
+});
+const toggleGameFullscreen = () => fullscreen.toggle();
 
 function showGame() {
   landing.classList.add('hidden');
   game.classList.remove('hidden');
-}
-
-function getSampleRate() {
-  return audioCtx?.sampleRate || 44100;
-}
-
-function initAudio() {
-  if (audioCtx) {
-    audioCtx.resume?.();
-    audioEnabled = true;
-    updateSoundButton();
-    return;
-  }
-
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) {
-    setStatus('当前浏览器不支持声音');
-    return;
-  }
-
-  try {
-    audioCtx = new AudioContextClass();
-    const capacity = Math.max(16384, Math.ceil(audioCtx.sampleRate * 0.5));
-    audioL = new Float32Array(capacity);
-    audioR = new Float32Array(capacity);
-    audioRead = 0;
-    audioWrite = 0;
-    audioCount = 0;
-
-    scriptNode = audioCtx.createScriptProcessor(1024, 0, 2);
-    scriptNode.onaudioprocess = (event) => {
-      const outL = event.outputBuffer.getChannelData(0);
-      const outR = event.outputBuffer.getChannelData(1);
-      for (let i = 0; i < outL.length; i++) {
-        if (audioEnabled && audioCount > 0) {
-          outL[i] = audioL[audioRead];
-          outR[i] = audioR[audioRead];
-          audioRead = (audioRead + 1) % audioL.length;
-          audioCount--;
-        } else {
-          outL[i] = 0;
-          outR[i] = 0;
-        }
-      }
-    };
-    scriptNode.connect(audioCtx.destination);
-    if (typeof audioCtx.createMediaStreamDestination === 'function') {
-      streamAudioDestination = audioCtx.createMediaStreamDestination();
-      scriptNode.connect(streamAudioDestination);
-    }
-    audioCtx.resume?.();
-    audioEnabled = true;
-    updateSoundButton();
-  } catch (error) {
-    console.warn(error);
-    setStatus('声音启动失败，可继续无声游玩');
-  }
-}
-
-function clearAudioBuffer() {
-  audioRead = 0;
-  audioWrite = 0;
-  audioCount = 0;
-  audioResampleAccumulator = 0;
 }
 
 function updateSoundButton() {
@@ -2941,42 +2263,10 @@ function updateSoundButton() {
     setButtonIcon(soundBtn, 'volume', remoteStreamAudio.muted || remoteStreamAudio.paused ? '开启声音' : '声音已开启');
     return;
   }
-  if (!audioCtx) {
+  if (!audio.getContext()) {
     setButtonIcon(soundBtn, 'volume', '开启声音');
   } else {
-    setButtonIcon(soundBtn, 'volume', audioEnabled ? '声音已开启' : '声音已关闭');
-  }
-}
-
-function writeAudioSample(left, right) {
-  if (!audioCtx || !audioL) return;
-  // Keep latency bounded after a slow frame or an iOS audio interruption.
-  const maxBufferedSamples = Math.ceil(audioCtx.sampleRate * 0.12);
-  while (audioCount > maxBufferedSamples) {
-    audioRead = (audioRead + 1) % audioL.length;
-    audioCount--;
-  }
-  if (audioCount >= audioL.length - 1) {
-    audioRead = (audioRead + 1) % audioL.length;
-    audioCount--;
-  }
-  audioL[audioWrite] = left;
-  audioR[audioWrite] = right;
-  audioWrite = (audioWrite + 1) % audioL.length;
-  audioCount++;
-}
-
-function pushAudioSample(left, right) {
-  if (!audioCtx || !audioL) return;
-  const sourceRate = Math.max(8000, Number(nes?.papu?.sampleRate) || audioCtx.sampleRate);
-  audioResampleAccumulator += audioCtx.sampleRate / sourceRate;
-  // Rates normally differ by only 44.1/48 kHz. The cap prevents a corrupted
-  // snapshot from filling the entire audio ring in one callback.
-  let written = 0;
-  while (audioResampleAccumulator >= 1 && written < 4) {
-    writeAudioSample(left, right);
-    audioResampleAccumulator -= 1;
-    written++;
+    setButtonIcon(soundBtn, 'volume', audio.isEnabled() ? '声音已开启' : '声音已关闭');
   }
 }
 
@@ -2992,7 +2282,7 @@ function arrayBufferToBinary(buffer) {
 
 function createNES() {
   return new NES({
-    sampleRate: getSampleRate(),
+    sampleRate: audio.getSampleRate(),
     onFrame(frameBuffer24) {
       if (suppressEmulatorOutput) return;
       for (let i = 0; i < FRAMEBUFFER_SIZE; i++) {
@@ -3357,14 +2647,7 @@ soundBtn.addEventListener('click', () => {
     updateSoundButton();
     return;
   }
-  if (!audioCtx) {
-    initAudio();
-  } else {
-    audioEnabled = !audioEnabled;
-    clearAudioBuffer();
-    audioCtx.resume?.();
-    updateSoundButton();
-  }
+  audio.toggle();
 });
 
 settingsBtn.addEventListener('click', () => {
@@ -3373,7 +2656,7 @@ settingsBtn.addEventListener('click', () => {
 });
 closeSettingsBtn.addEventListener('click', dialogController.closeSettings);
 layoutEditBtn.addEventListener('click', () => {
-  const nextMode = !layoutEditMode;
+  const nextMode = !controlLayout.isEditing();
   setLayoutEditMode(nextMode);
   if (nextMode) {
     dialogController.closeSettings();
@@ -3477,8 +2760,6 @@ fullscreenBtn.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleGameFullscreen();
 });
-document.addEventListener('fullscreenchange', handleFullscreenChange);
-document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('gesturestart', (event) => {
   if (game.contains(event.target)) event.preventDefault();
 }, { passive: false });
@@ -3508,11 +2789,6 @@ const buttonMap = {
   TURBO_B: Controller.BUTTON_TURBO_B,
 };
 
-const keyboardMap = {
-  ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT',
-  z: 'A', Z: 'A', x: 'B', X: 'B', Enter: 'START', Shift: 'SELECT',
-};
-
 function syncLocalPlayerState() {
   const next = getLocalMergedButtons();
   syncButtonVisuals();
@@ -3535,358 +2811,18 @@ function releaseAllButtons({ broadcast = false } = {}) {
     sendPeerButtons(localPlayer, new Set());
   }
   suppressNetworkBroadcast = true;
-  localSourceStates.keyboard.clear();
-  localSourceStates.dpad.clear();
-  localSourceStates.action.clear();
+  controllerInput?.clear({ notifyChange: false });
   setPlayerButtons(1, new Set(), { broadcast: false });
   setPlayerButtons(2, new Set(), { broadcast: false });
   suppressNetworkBroadcast = false;
-  actionPointerId = null;
-  dpadPointerId = null;
   syncButtonVisuals();
 }
 
-function getActionButton(name) {
-  return document.querySelector(`[data-btn="${name}"]`);
-}
-
-function getActionButtonsFromPoint(point) {
-  const next = new Set();
-  const touchRadius = Math.max(16, point.radiusX || 0, point.radiusY || 0, (point.width || 0) / 2, (point.height || 0) / 2);
-  const aButton = getActionButton('A');
-  const bButton = getActionButton('B');
-
-  if (aButton && bButton) {
-    const aRect = aButton.getBoundingClientRect();
-    const bRect = bButton.getBoundingClientRect();
-    const middleX = (aRect.left + aRect.width / 2 + bRect.left + bRect.width / 2) / 2;
-    const middleY = (aRect.top + aRect.height / 2 + bRect.top + bRect.height / 2) / 2;
-    const buttonRadius = Math.min(aRect.width, aRect.height, bRect.width, bRect.height) / 2;
-    const comboRadius = Math.max(16, Math.min(24, buttonRadius * 0.46));
-    const comboDistance = Math.hypot(point.clientX - middleX, point.clientY - middleY);
-    if (comboDistance <= comboRadius + Math.min(3, touchRadius * 0.12)) {
-      return new Set(['A', 'B']);
-    }
-  }
-
-  for (const name of ['A', 'B']) {
-    const button = getActionButton(name);
-    if (!button) continue;
-    const rect = button.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const buttonRadius = Math.max(rect.width, rect.height) / 2;
-    const distance = Math.hypot(point.clientX - cx, point.clientY - cy);
-    if (distance <= buttonRadius + touchRadius * 0.2) next.add(name);
-  }
-
-  return next;
-}
-
-function isRotatedLandscapeFallback() {
-  return document.body.classList.contains('landscape-mode') && window.matchMedia('(orientation: portrait)').matches;
-}
-
-function setActionButtons(next) {
-  localSourceStates.action = new Set(next);
-  syncLocalPlayerState();
-}
-
-function bindActionZone() {
-  if (!actionZone) return;
-
-  const start = (event, point, pointerId = null) => {
-    if (layoutEditMode) return;
-    const next = getActionButtonsFromPoint(point);
-    const isCombo = next.has('A') && next.has('B');
-    if (event.target.closest('[data-btn]') && !isCombo) return;
-    if (!next.size) return;
-    event.preventDefault();
-    event.stopPropagation();
-    actionPointerId = pointerId;
-    if (pointerId !== null) actionZone.setPointerCapture?.(pointerId);
-    setActionButtons(next);
-  };
-
-  const move = (event, point, pointerId = null) => {
-    if (actionPointerId === null || (pointerId !== null && pointerId !== actionPointerId)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setActionButtons(getActionButtonsFromPoint(point));
-  };
-
-  const end = (event, pointerId = null) => {
-    if (actionPointerId === null || (pointerId !== null && pointerId !== actionPointerId)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setActionButtons(new Set());
-    actionPointerId = null;
-  };
-
-  actionZone.addEventListener('pointerdown', (event) => start(event, event, event.pointerId), true);
-  actionZone.addEventListener('pointermove', (event) => move(event, event, event.pointerId), true);
-  actionZone.addEventListener('pointerup', (event) => end(event, event.pointerId), true);
-  actionZone.addEventListener('pointercancel', (event) => end(event, event.pointerId), true);
-
-  actionZone.addEventListener('touchstart', (event) => {
-    const touch = event.changedTouches[0];
-    if (touch) start(event, touch, touch.identifier);
-  }, { passive: false, capture: true });
-  actionZone.addEventListener('touchmove', (event) => {
-    const touch = Array.from(event.changedTouches).find((item) => item.identifier === actionPointerId);
-    if (touch) move(event, touch, touch.identifier);
-  }, { passive: false, capture: true });
-  const endTouch = (event) => {
-    const touch = Array.from(event.changedTouches).find((item) => item.identifier === actionPointerId);
-    if (touch) end(event, touch.identifier);
-  };
-  actionZone.addEventListener('touchend', endTouch, { passive: false, capture: true });
-  actionZone.addEventListener('touchcancel', endTouch, { passive: false, capture: true });
-}
-
-function bindTouchButton(button) {
-  const name = button.dataset.btn;
-  if (!name) return;
-  const names = name === 'AB' ? ['A', 'B'] : [name];
-  let pointerId = null;
-
-  button.addEventListener('pointerdown', (event) => {
-    if (layoutEditMode) return;
-    event.preventDefault();
-    pointerId = event.pointerId;
-    button.setPointerCapture?.(pointerId);
-    names.forEach((buttonName) => localSourceStates.action.add(buttonName));
-    syncLocalPlayerState();
-  });
-
-  const up = (event) => {
-    if (pointerId !== null && event.pointerId !== pointerId) return;
-    event.preventDefault();
-    names.forEach((buttonName) => localSourceStates.action.delete(buttonName));
-    syncLocalPlayerState();
-    pointerId = null;
-  };
-
-  button.addEventListener('pointerup', up);
-  button.addEventListener('pointercancel', up);
-}
-
-document.querySelectorAll('[data-btn]').forEach(bindTouchButton);
-bindActionZone();
-
-function bindDraggableControl(element) {
-  let drag = null;
-  let pinch = null;
-
-  const getTouchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-
-  const startDrag = (event, point, pointerId = null) => {
-    if (!layoutEditMode) return;
-    event.preventDefault();
-    event.stopPropagation();
-    selectControl(element);
-    const key = getControlKey(element);
-    const offset = controlOffsets[key] || { x: 0, y: 0 };
-    drag = {
-      pointerId,
-      key,
-      startX: point.clientX,
-      startY: point.clientY,
-      baseX: Number(offset.x) || 0,
-      baseY: Number(offset.y) || 0,
-      baseScale: Number(offset.scale) || 1,
-    };
-    if (pointerId !== null) element.setPointerCapture?.(pointerId);
-    element.classList.add('dragging');
-  };
-
-  const moveDrag = (event, point, pointerId = null) => {
-    if (!drag || (pointerId !== null && drag.pointerId !== pointerId)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const dx = point.clientX - drag.startX;
-    const dy = point.clientY - drag.startY;
-    const rawX = isRotatedLandscapeFallback() ? drag.baseX + dy : drag.baseX + dx;
-    const rawY = isRotatedLandscapeFallback() ? drag.baseY - dx : drag.baseY + dy;
-    const maxX = Math.max(80, window.innerWidth * 0.42);
-    const maxY = Math.max(80, window.innerHeight * 0.42);
-    const nextX = Math.max(-maxX, Math.min(maxX, rawX));
-    const nextY = Math.max(-maxY, Math.min(maxY, rawY));
-    controlOffsets[drag.key] = {
-      x: Math.round(nextX),
-      y: Math.round(nextY),
-      scale: drag.baseScale,
-    };
-    applyControlOffsets();
-    positionScaleTools();
-  };
-
-  const endDrag = (event, pointerId = null) => {
-    if (!drag || (pointerId !== null && drag.pointerId !== pointerId)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    element.classList.remove('dragging');
-    drag = null;
-    saveControlOffsets();
-    positionScaleTools();
-  };
-
-  element.addEventListener('pointerdown', (event) => {
-    startDrag(event, event, event.pointerId);
-  });
-
-  element.addEventListener('pointermove', (event) => {
-    moveDrag(event, event, event.pointerId);
-  });
-
-  element.addEventListener('touchstart', (event) => {
-    if (!layoutEditMode) return;
-    if (event.touches.length >= 2) {
-      event.preventDefault();
-      event.stopPropagation();
-      const key = getControlKey(element);
-      const offset = controlOffsets[key] || { x: 0, y: 0, scale: 1 };
-      pinch = {
-        key,
-        startDistance: getTouchDistance(event.touches),
-        baseScale: Number(offset.scale) || 1,
-      };
-      drag = null;
-      element.classList.add('dragging');
-      return;
-    }
-    const touch = event.changedTouches[0];
-    if (touch) startDrag(event, touch, touch.identifier);
-  }, { passive: false });
-
-  element.addEventListener('touchmove', (event) => {
-    if (pinch && event.touches.length >= 2) {
-      event.preventDefault();
-      event.stopPropagation();
-      const offset = controlOffsets[pinch.key] || { x: 0, y: 0, scale: 1 };
-      const nextScale = Math.min(1.8, Math.max(0.65, pinch.baseScale * (getTouchDistance(event.touches) / pinch.startDistance)));
-      controlOffsets[pinch.key] = { ...offset, scale: Number(nextScale.toFixed(3)) };
-      applyControlOffsets();
-      positionScaleTools();
-      return;
-    }
-    const touch = Array.from(event.changedTouches).find((item) => drag && item.identifier === drag.pointerId);
-    if (touch) moveDrag(event, touch, touch.identifier);
-  }, { passive: false });
-
-  const endTouchDrag = (event) => {
-    if (pinch && event.touches.length < 2) {
-      event.preventDefault();
-      event.stopPropagation();
-      element.classList.remove('dragging');
-      pinch = null;
-      saveControlOffsets();
-      return;
-    }
-    const touch = Array.from(event.changedTouches).find((item) => drag && item.identifier === drag.pointerId);
-    if (touch) endDrag(event, touch.identifier);
-  };
-
-  element.addEventListener('pointerup', endDrag);
-  element.addEventListener('pointercancel', endDrag);
-  element.addEventListener('touchend', endTouchDrag, { passive: false });
-  element.addEventListener('touchcancel', endTouchDrag, { passive: false });
-}
-
-getAdjustableControls().forEach(bindDraggableControl);
-window.addEventListener('resize', () => {
-  applyControlOffsets();
-  positionScaleTools();
-});
-window.addEventListener('orientationchange', () => window.setTimeout(() => {
-  applyControlOffsets();
-  positionScaleTools();
-}, 80));
-game.addEventListener('pointerdown', (event) => {
-  if (!layoutEditMode) return;
-  if (event.target.closest('#dpad, [data-btn], dialog, .topHud')) return;
-  event.preventDefault();
-  saveControlOffsets();
-  document.body.classList.remove('settings-open');
-  setLayoutEditMode(false);
-}, true);
-
-function setDpadDirections(next) {
-  localSourceStates.dpad = new Set(next);
-  syncLocalPlayerState();
-}
-
-function updateDpadFromPointer(event) {
-  const rect = dpad.getBoundingClientRect();
-  const cx = rect.width / 2;
-  const cy = rect.height / 2;
-  let localX = event.clientX - rect.left;
-  let localY = event.clientY - rect.top;
-  if (isRotatedLandscapeFallback()) {
-    const sx = localX - cx;
-    const sy = localY - cy;
-    localX = cx + sy;
-    localY = cy - sx;
-  }
-  const dx = (localX - cx) / cx;
-  const dy = (localY - cy) / cy;
-  const next = new Set();
-  const distance = Math.hypot(dx, dy);
-  const deadZone = 0.28;
-  const diagonalThreshold = 0.48;
-  if (distance < deadZone) {
-    setDpadDirections(next);
-    return;
-  }
-  const nx = dx / distance;
-  const ny = dy / distance;
-  if (nx < -diagonalThreshold) next.add('LEFT');
-  if (nx > diagonalThreshold) next.add('RIGHT');
-  if (ny < -diagonalThreshold) next.add('UP');
-  if (ny > diagonalThreshold) next.add('DOWN');
-  setDpadDirections(next);
-}
-
-dpad.addEventListener('pointerdown', (event) => {
-  if (layoutEditMode) return;
-  event.preventDefault();
-  dpadPointerId = event.pointerId;
-  dpad.setPointerCapture?.(dpadPointerId);
-  updateDpadFromPointer(event);
-});
-
-dpad.addEventListener('pointermove', (event) => {
-  if (event.pointerId !== dpadPointerId) return;
-  event.preventDefault();
-  updateDpadFromPointer(event);
-});
-
-function releaseDpad(event) {
-  if (event.pointerId !== dpadPointerId) return;
-  event.preventDefault();
-  localSourceStates.dpad.clear();
-  syncLocalPlayerState();
-  dpadPointerId = null;
-}
-
-dpad.addEventListener('pointerup', releaseDpad);
-dpad.addEventListener('pointercancel', releaseDpad);
-
-window.addEventListener('keydown', (event) => {
-  if (layoutEditMode) return;
-  const name = keyboardMap[event.key];
-  if (!name) return;
-  event.preventDefault();
-  localSourceStates.keyboard.add(name);
-  syncLocalPlayerState();
-});
-window.addEventListener('keyup', (event) => {
-  if (layoutEditMode) return;
-  const name = keyboardMap[event.key];
-  if (!name) return;
-  event.preventDefault();
-  localSourceStates.keyboard.delete(name);
-  syncLocalPlayerState();
+controllerInput = createInputController({
+  actionZone,
+  dpad,
+  layout: controlLayout,
+  onChange: syncLocalPlayerState,
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -3907,9 +2843,6 @@ window.addEventListener('blur', () => {
   releaseAllButtons({ broadcast: true });
 });
 window.addEventListener('pagehide', () => releaseAllButtons({ broadcast: true }));
-readControlOffsets();
-applyControlOffsets();
-applyControlOpacity(localStorage.getItem(CONTROL_OPACITY_STORAGE_KEY) || 90);
 try {
   cloudAccessKey.value = localStorage.getItem(CLOUD_ACCESS_KEY_STORAGE_KEY) || '';
   cloudRememberKey.checked = Boolean(cloudAccessKey.value);
@@ -3959,8 +2892,4 @@ updateFullscreenButton();
 logNetworkEvent('app-start', { relayConfigured: Boolean(RELAY_SERVER_URL), online: navigator.onLine });
 restoreNetworkRoom();
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(console.warn);
-  });
-}
+registerServiceWorker();
