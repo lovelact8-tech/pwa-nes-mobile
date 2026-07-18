@@ -2474,7 +2474,7 @@ async function requestRelayTickets(nextRoomId, accessKey) {
       name: error?.name || 'Error',
       message: error?.message || String(error),
     });
-    throw new Error(`无法访问私人中继 ${ticketUrl.hostname}，请确认 Tailscale 已开启`);
+    throw new Error(`无法访问私人中继 ${ticketUrl.hostname}，请确认当前网络支持 IPv6，且家中 TCP 443 服务在线`);
   }
   const result = await response.json().catch(() => ({}));
   logNetworkEvent('relay-ticket-response', { status: response.status, ok: response.ok, hostToken: Boolean(result.hostToken), guestToken: Boolean(result.guestToken), error: result.error || '' });
@@ -3966,3 +3966,4 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(console.warn);
   });
 }
+
