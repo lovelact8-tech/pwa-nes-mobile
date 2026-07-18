@@ -1312,10 +1312,9 @@ function sendPeerButtons(player, buttons) {
     sendPeerMessage({ type: 'input', player, ...inputPayload(nextButtons), frame, id, order });
     return;
   }
-  // A healthy Tailscale/direct route uses real rollback: apply 2P locally on
-  // the next frame and let the host rewind the one or two frames spent in
-  // transit. This removes artificial 2P input delay. Slower routes retain a
-  // future-frame buffer so a single input cannot trigger a huge replay.
+  // Target a near-future frame on the authoritative host clock. Rollback is a
+  // jitter safety net, not the normal path: rewinding on every rapid 2P edge
+  // stalls video and audio on both devices.
   const estimatedHostFrame = getEstimatedHostFrame();
   const inputPlan = getGuestInputPlan({
     gameFrame,
@@ -2142,7 +2141,7 @@ function handleNetworkMessage(message) {
     const buttons = messageButtons(message);
     if (message.player === 2 && String(message.id || '').startsWith('g-')) {
       const now = performance.now();
-      if (message.hostLate && !message.lowLatencyRollback) {
+      if (message.hostLate) {
         const previousSafetyFrames = guestInputSafetyFrames;
         guestInputSafetyFrames = Math.min(GUEST_INPUT_MAX_SAFETY_FRAMES, guestInputSafetyFrames + 1);
         guestLastLateInputAt = now;
@@ -3963,4 +3962,3 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(console.warn);
   });
 }
-

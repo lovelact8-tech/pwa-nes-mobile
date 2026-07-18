@@ -1,6 +1,9 @@
 export const MAX_PEER_QUEUE_SIZE = 32;
 export const NET_INPUT_DELAY_FRAMES = 1;
-export const GUEST_INPUT_MIN_LEAD_FRAMES = 1;
+// Keep remote edges at least two frames ahead of the host. Scheduling every
+// edge for the guest's next local frame made a healthy 30 ms route arrive one
+// or two frames late, forcing the host to replay on every rapid tap.
+export const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
 export const GUEST_INPUT_MAX_LEAD_FRAMES = 4;
 export const GUEST_INPUT_MAX_SAFETY_FRAMES = 2;
 export const GUEST_INPUT_SAFETY_DECAY_MS = 15000;

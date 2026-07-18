@@ -32,12 +32,12 @@ export function getGuestInputPlan({
   );
   const rollback = shouldUseGuestRollback({ rttMs, jitterMs, transportStalled });
   return {
-    frame: rollback
-      ? localFrame + 1
-      : Math.max(localFrame + 1, Math.ceil(hostFrame) + leadFrames),
+    // Target the authoritative host clock even on rollback-capable routes.
+    // Rollback remains a jitter safety net instead of running for every edge.
+    frame: Math.max(localFrame + 1, Math.ceil(hostFrame) + leadFrames),
     leadFrames,
     transitFrames,
-    mode: rollback ? 'rollback' : 'buffered',
+    mode: rollback ? 'rollback-buffered' : 'buffered',
     rollback,
   };
 }
