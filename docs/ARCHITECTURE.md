@@ -48,6 +48,6 @@ main.js
 1. 新功能先判断所属模块，再由 `main.js` 注入必要回调。
 2. 模块内部状态使用工厂函数闭包保存，不增加 `window` 全局变量。
 3. ROM加载后兼容层和状态恢复路径必须保持一致。
-4. 输入或联机修改后必须运行 `npm run netplay:test`。
+4. 输入延迟策略修改后必须运行 `npm run latency:test` 和 `npm run netplay:test`。
 5. ROM兼容修改必须运行 `npm run modules:test` 和 `npm run rom-compat:test`。
 6. 发布前运行 `npm run build`，并递增 `public/sw.js` 缓存版本。

@@ -5,6 +5,13 @@ export const NET_INPUT_DELAY_FRAMES = 1;
 // or two frames late, forcing the host to replay on every rapid tap.
 export const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
 export const GUEST_INPUT_MAX_LEAD_FRAMES = 4;
+// Stable routes can deliberately arrive up to one frame late and let rollback
+// repair that edge. This removes one frame of 2P input delay without applying
+// the aggressive policy to a jittery mobile/Wi-Fi route.
+export const GUEST_ROLLBACK_INPUT_MIN_LEAD_FRAMES = 1;
+export const GUEST_ROLLBACK_INPUT_MAX_LEAD_FRAMES = 3;
+export const GUEST_ROLLBACK_TRANSIT_DISCOUNT_FRAMES = 1;
+export const GUEST_ROLLBACK_LATE_TOLERANCE_FRAMES = 2;
 export const GUEST_INPUT_MAX_SAFETY_FRAMES = 2;
 export const GUEST_INPUT_SAFETY_DECAY_MS = 15000;
 // Rollback remains cheaper than delaying every 2P edge on a healthy mobile or

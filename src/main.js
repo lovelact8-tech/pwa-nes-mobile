@@ -17,7 +17,7 @@ import {
   hashDeterministicComponents,
 } from './netplay/state.js';
 import { inputPayload, messageButtons } from './netplay/input.js';
-import { getGuestInputPlan } from './netplay/latency-policy.js';
+import { getGuestInputLateness, getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
 import { createAudioController } from './emulator/audio.js';
@@ -127,6 +127,7 @@ let hostClockReceivedAt = 0;
 let networkTransportStalled = false;
 let guestInputSafetyFrames = 0;
 let guestLastLateInputAt = 0;
+let lastInputAckSampleAt = 0;
 let lastStateRequestAt = 0;
 let networkSyncPaused = false;
 let networkSyncId = '';
@@ -792,6 +793,7 @@ function sendPeerButtons(player, buttons) {
     frame,
     id,
     lowLatencyRollback,
+    clientSentAt: Math.round(performance.now()),
   });
 }
 
@@ -1315,6 +1317,7 @@ function teardownPeerConnection(finalStatus = '') {
   networkTransportStalled = false;
   guestInputSafetyFrames = 0;
   guestLastLateInputAt = 0;
+  lastInputAckSampleAt = 0;
   lastStateRequestAt = 0;
   clearNetworkSync();
   lastNetworkClockAt = 0;
@@ -1507,6 +1510,11 @@ function handleNetworkMessage(message) {
     const id = String(message.id || `g-legacy-${++networkEventOrder}`);
     const order = ++authoritativeInputOrder;
     const scheduled = scheduleNetworkInput(message.player, buttons, frame, { id, order, deferRollback: true });
+    const inputLateness = getGuestInputLateness({
+      requestedFrame: frame,
+      hostFrame: gameFrame,
+      rollbackEnabled: Boolean(message.lowLatencyRollback),
+    });
     logNetworkEvent('input-request-received', {
       player: message.player,
       buttons,
@@ -1516,6 +1524,8 @@ function handleNetworkMessage(message) {
       rolledBack: scheduled.rolledBack,
       rollbackQueued: scheduled.rollbackQueued,
       correctedFrame: frame !== requestedFrame,
+      latenessFrames: inputLateness.latenessFrames,
+      excessiveLate: inputLateness.tooLate,
     });
     sendPeerMessage({
       type: 'input',
@@ -1524,8 +1534,9 @@ function handleNetworkMessage(message) {
       frame,
       id,
       order,
-      hostLate: scheduled.late,
+      hostLate: inputLateness.tooLate,
       lowLatencyRollback: Boolean(message.lowLatencyRollback),
+      clientSentAt: Number(message.clientSentAt) || 0,
     });
     return;
   }
@@ -1584,6 +1595,12 @@ function handleNetworkMessage(message) {
     const buttons = messageButtons(message);
     if (message.player === 2 && String(message.id || '').startsWith('g-')) {
       const now = performance.now();
+      const clientSentAt = Number(message.clientSentAt) || 0;
+      const inputAckRtt = clientSentAt > 0 ? now - clientSentAt : 0;
+      if (inputAckRtt > 0 && inputAckRtt <= 5000 && now - lastInputAckSampleAt >= 500) {
+        lastInputAckSampleAt = now;
+        recordNetworkRtt(inputAckRtt, 'input-ack');
+      }
       if (message.hostLate) {
         const previousSafetyFrames = guestInputSafetyFrames;
         guestInputSafetyFrames = Math.min(GUEST_INPUT_MAX_SAFETY_FRAMES, guestInputSafetyFrames + 1);
@@ -2401,6 +2418,7 @@ function startRom(romData, name = 'NES 游戏') {
     networkTransportStalled = false;
     guestInputSafetyFrames = 0;
     guestLastLateInputAt = 0;
+    lastInputAckSampleAt = 0;
     lastStateRequestAt = 0;
     for (const player of [1, 2]) {
       for (const buttonName of buttonStateByPlayer[player]) {
