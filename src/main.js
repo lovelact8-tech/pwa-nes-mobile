@@ -12,6 +12,7 @@ import {
   hashDeterministicComponents,
 } from './netplay/state.js';
 import { inputPayload, messageButtons } from './netplay/input.js';
+import { getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
@@ -1316,19 +1317,15 @@ function sendPeerButtons(player, buttons) {
   // transit. This removes artificial 2P input delay. Slower routes retain a
   // future-frame buffer so a single input cannot trigger a huge replay.
   const estimatedHostFrame = getEstimatedHostFrame();
-  const transitFrames = networkRttMs > 0 ? Math.ceil((networkRttMs / 2) / FRAME_MS) : 1;
-  const leadFrames = Math.max(
-    GUEST_INPUT_MIN_LEAD_FRAMES,
-    Math.min(GUEST_INPUT_MAX_LEAD_FRAMES, transitFrames + guestInputSafetyFrames),
-  );
-  // Rewinding jsnes is much more expensive than a native fighting-game core.
-  // Only predict into the very next frame on a genuinely LAN-like route.
-  // A 35–50ms Tailscale path otherwise makes virtually every press/release
-  // arrive behind the host and causes dozens of 10–45ms replays per second.
-  const lowLatencyRollback = networkRttMs > 0 && networkRttMs <= 22 && networkRttJitterMs <= 8;
-  const frame = lowLatencyRollback
-    ? gameFrame + 1
-    : Math.max(gameFrame + 1, Math.ceil(estimatedHostFrame) + leadFrames);
+  const inputPlan = getGuestInputPlan({
+    gameFrame,
+    estimatedHostFrame,
+    rttMs: networkRttMs,
+    jitterMs: networkRttJitterMs,
+    safetyFrames: guestInputSafetyFrames,
+    transportStalled: networkTransportStalled,
+  });
+  const { frame, leadFrames, transitFrames, rollback: lowLatencyRollback } = inputPlan;
   const order = ++networkEventOrder;
   // While the host clock is unavailable, retain immediate touch feedback but
   // do not advance a speculative game timeline. The host still receives the
@@ -1342,7 +1339,7 @@ function sendPeerButtons(player, buttons) {
     localFrame: gameFrame,
     estimatedHostFrame: Math.round(estimatedHostFrame),
     leadFrames,
-    mode: lowLatencyRollback ? 'rollback' : 'buffered',
+    mode: inputPlan.mode,
     id,
     predicted: !networkTransportStalled,
   });
