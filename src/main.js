@@ -136,6 +136,8 @@ let networkSyncProbeId = '';
 let networkSyncProbeSentAt = 0;
 let networkSyncProbeTimeout = 0;
 let stateRequestInFlight = false;
+let romRequestRetryTimer = 0;
+let romRequestAttempts = 0;
 let suppressEmulatorOutput = false;
 let networkRttMs = 0;
 let networkRttJitterMs = 0;
@@ -1172,6 +1174,28 @@ function clearNetworkSync() {
   stateRequestInFlight = false;
 }
 
+function clearRomRequestRetry() {
+  clearTimeout(romRequestRetryTimer);
+  romRequestRetryTimer = 0;
+  romRequestAttempts = 0;
+}
+
+function requestPeerRom(reason = 'initial') {
+  if (networkRole !== 'guest' || isAuthoritativeStreamMode() || !peerConnected || lastRomData) return;
+  const attempt = ++romRequestAttempts;
+  logNetworkEvent('rom-request-sent', { reason, attempt });
+  sendPeerMessage({ type: 'rom-request', reason, attempt });
+  clearTimeout(romRequestRetryTimer);
+  if (attempt < 6) {
+    romRequestRetryTimer = window.setTimeout(() => {
+      romRequestRetryTimer = 0;
+      requestPeerRom('retry');
+    }, attempt < 3 ? 1200 : 2000);
+  } else {
+    setNetworkText('仍在等待 1P 发送游戏，请确认 1P 未暂停在后台');
+  }
+}
+
 function startHostStateSync(syncId) {
   if (!syncId || networkSyncId) return;
   networkSyncId = syncId;
@@ -1252,6 +1276,7 @@ function finishGuestStateSync(targetFrame, detail = {}) {
 }
 
 function applyPeerRom(romData, name = 'NES 游戏') {
+  clearRomRequestRetry();
   pendingPeerRomData = romData;
   lastRomData = romData;
   lastRomName = name;
@@ -1329,6 +1354,7 @@ function teardownPeerConnection(finalStatus = '') {
   networkPingTimeoutCount = 0;
   lastGuestCatchUpLogAt = 0;
   lastLateInputResyncAt = 0;
+  clearRomRequestRetry();
   performanceHudLastAt = 0;
   performanceHudFrames = 0;
   performanceHudFps = 0;
@@ -1431,8 +1457,7 @@ function markNetworkConnected() {
     // Do not rely solely on the host's peer-connected notification. Mobile
     // WebSockets can finish opening after a stale guest has just been
     // replaced, leaving the new page connected but waiting forever for ROM.
-    logNetworkEvent('rom-request-sent');
-    sendPeerMessage({ type: 'rom-request' });
+    requestPeerRom('connected');
   }
 }
 
@@ -1667,7 +1692,7 @@ function handleNetworkMessage(message) {
   }
   if (message.type === 'rom-request' && networkRole === 'host') {
     logNetworkEvent('rom-request-received', { alreadySent: peerRomSent, hasRom: Boolean(lastRomData) });
-    if (!peerRomSent) sendCurrentRomToPeer();
+    if (lastRomData) sendCurrentRomToPeer();
     return;
   }
   if (message.type === 'rom' && networkRole === 'guest') {
