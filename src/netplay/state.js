@@ -1,3 +1,5 @@
+import { installRomCompatibility } from '../emulator/rom-compat.js';
+
 const RENDER_ONLY_PPU_KEYS = new Set([
   'buffer',
   'bgbuffer',
@@ -125,6 +127,7 @@ export function restoreDeterministicState(nes, state, { preserveLocalAudio = fal
   const ppuState = state.ppu;
   if (!ppuState) {
     nes.fromJSON(state);
+    installRomCompatibility(nes, nes.romData);
     resetLocalAudioOutput(nes, localAudio);
     return;
   }
@@ -142,6 +145,9 @@ export function restoreDeterministicState(nes, state, { preserveLocalAudio = fal
   ppuState.vramMirrorTable = nes.ppu.vramMirrorTable;
   try {
     nes.fromJSON(state);
+    // jsnes reset() creates a fresh mapper during fromJSON(), so ROM-specific
+    // mapper wrappers must be reinstalled after every rollback/state sync.
+    installRomCompatibility(nes, nes.romData);
     resetLocalAudioOutput(nes, localAudio);
   } finally {
     // A saved snapshot must never keep references to mutable live render data.

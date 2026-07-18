@@ -11,6 +11,7 @@ import {
   deterministicStateView,
 } from '../src/netplay/state.js';
 import { decodeInputMask, encodeInputMask, messageButtons } from '../src/netplay/input.js';
+import { installRomCompatibility } from '../src/emulator/rom-compat.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultRom = path.join(root, 'public/FC中文游戏/201-400/0310 - 国夫君的热血足球联盟 (简) [惊风&空气].zip');
@@ -37,6 +38,7 @@ function createEmulator(sampleRate = 48000) {
     sampleRate,
   });
   nes.loadROM(rom);
+  installRomCompatibility(nes, rom);
   return { nes, getFrameHash: () => frameHash };
 }
 

@@ -10,7 +10,9 @@
     "dev": "vite --host 0.0.0.0",
     "prebuild": "npm run games:index",
     "build": "vite build",
+    "modules:test": "node scripts/test-modules.mjs",
     "netplay:test": "node scripts/test-netplay-determinism.mjs",
+    "rom-compat:test": "node scripts/test-tunshi-mapper198.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "relay": "node relay-server/server.mjs",
     "relay:test": "node relay-server/test.mjs"

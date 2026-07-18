@@ -14,6 +14,7 @@ import {
 import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
+import { installRomCompatibility } from './emulator/rom-compat.js';
 import {
   MAX_PEER_QUEUE_SIZE, NET_INPUT_DELAY_FRAMES, GUEST_INPUT_MIN_LEAD_FRAMES,
   GUEST_INPUT_MAX_LEAD_FRAMES, GUEST_INPUT_MAX_SAFETY_FRAMES, GUEST_INPUT_SAFETY_DECAY_MS,
@@ -3101,6 +3102,7 @@ function startRom(romData, name = 'NES 游戏') {
     clearAudioBuffer();
     nes = createNES();
     nes.loadROM(romData);
+    installRomCompatibility(nes, romData);
     gameFrame = 0;
     resetRollbackState({ capture: true });
     lastQueuedLocalButtons = new Set();
