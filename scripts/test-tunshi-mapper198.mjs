@@ -5,21 +5,31 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NES, Controller } from 'jsnes';
 import { unzipSync } from 'fflate';
-import { installRomCompatibility, isKnownTunshi640kRom } from '../src/emulator/rom-compat.js';
+import {
+  installRomCompatibility,
+  isKnownTunshi640kRom,
+  isMmc3ChrRamExpansionRom,
+} from '../src/emulator/rom-compat.js';
 import { captureDeterministicState, restoreDeterministicState } from '../src/netplay/state.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultRom = path.join(root, 'public/FC中文游戏/601-800/0733 - 吞食天地2 - 诸葛孔明传 (简) [同能网].zip');
 const romPath = path.resolve(process.argv[2] || defaultRom);
-const archive = unzipSync(new Uint8Array(fs.readFileSync(romPath)));
-const romEntry = Object.entries(archive).find(([name]) => name.toLowerCase().endsWith('.nes'));
-if (!romEntry) throw new Error(`压缩包中没有 NES 文件：${romPath}`);
+const romFile = new Uint8Array(fs.readFileSync(romPath));
+const romEntry = romPath.toLowerCase().endsWith('.nes')
+  ? [path.basename(romPath), romFile]
+  : Object.entries(unzipSync(romFile)).find(([name]) => name.toLowerCase().endsWith('.nes'));
+if (!romEntry) throw new Error(`没有找到 NES 文件：${romPath}`);
 
 const romBytes = romEntry[1];
 const romHash = crypto.createHash('sha256').update(romBytes).digest('hex');
-assert.equal(romBytes.length, 655376);
-assert.equal(romHash, 'fd08b9144f8624a888a50a7c1d51a592f090d5d34cb4e0ef9f9de99d14186f5a');
-assert.equal(isKnownTunshi640kRom(romBytes), true);
+const supportedHashes = new Set([
+  'fd08b9144f8624a888a50a7c1d51a592f090d5d34cb4e0ef9f9de99d14186f5a',
+  '3e498dadded6b89cb3c2ecb84a25bd1fc5df23e2cecf52dcefe844ad8623d69d',
+]);
+assert.equal(supportedHashes.has(romHash), true, `未登记的测试 ROM：${romHash}`);
+assert.equal(isMmc3ChrRamExpansionRom(romBytes), true);
+if (romBytes.length === 655376) assert.equal(isKnownTunshi640kRom(romBytes), true);
 const rom = Array.from(romBytes, (byte) => String.fromCharCode(byte)).join('');
 
 function createScenario(name) {
@@ -100,6 +110,8 @@ verifyExpansionRamRollback(dualController);
 
 console.log(JSON.stringify({
   passed: true,
+  name: romEntry[0],
+  size: romBytes.length,
   sha256: romHash,
   singlePlayer: {
     frames: singlePlayer.getOutputFrames(),

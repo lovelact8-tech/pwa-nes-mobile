@@ -2424,6 +2424,19 @@ async function loadLibraryGame(game) {
   }
 }
 
+function formatRomLoadError(error) {
+  const message = error?.message || String(error || '');
+  const unsupportedMapper = message.match(/Unsupported mapper:\s*(\d+)/i);
+  if (unsupportedMapper) {
+    return `该 ROM 使用 Mapper ${unsupportedMapper[1]}，当前 jsnes 2.1.0 暂不支持。`;
+  }
+  const invalidOpcode = message.match(/invalid opcode at address\s*\$?([0-9a-f]+)/i);
+  if (invalidOpcode) {
+    return `ROM 运行到非法指令 $${invalidOpcode[1].toUpperCase()}，通常是特殊汉化版 Mapper/扩展 RAM 兼容问题。`;
+  }
+  return message || '请确认这是标准 iNES 格式的 .nes 文件。';
+}
+
 function startRom(romData, name = 'NES 游戏') {
   try {
     lastGameId = '';
@@ -2463,7 +2476,9 @@ function startRom(romData, name = 'NES 游戏') {
     updateCloudLibraryActivity({ incrementPlay: true }).catch(() => {});
   } catch (error) {
     console.error(error);
-    alert('加载失败：请确认这是标准 iNES 格式的 .nes 文件。');
+    const detail = formatRomLoadError(error);
+    setStatus(`加载失败：${detail}`);
+    alert(`加载失败：${detail}`);
   }
 }
 

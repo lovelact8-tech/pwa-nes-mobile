@@ -3,6 +3,7 @@ const TUNSHI_PRG_BANKS = 40;
 const TUNSHI_CHR_BANKS = 0;
 const TUNSHI_MAPPER = 4;
 const TUNSHI_ROM_SIZE = 655376;
+const MMC3_CHR_RAM_PRG_BANKS = new Set([40, 64]);
 const EXPANSION_RAM_START = 0x5000;
 const EXPANSION_RAM_END = 0x5fff;
 
@@ -30,8 +31,28 @@ export function isKnownTunshi640kRom(romData) {
     && mapper === TUNSHI_MAPPER;
 }
 
+export function isMmc3ChrRamExpansionRom(romData) {
+  const length = romData?.byteLength ?? romData?.length ?? 0;
+  if (byteAt(romData, 0) !== 0x4e || byteAt(romData, 1) !== 0x45
+      || byteAt(romData, 2) !== 0x53 || byteAt(romData, 3) !== 0x1a) return false;
+
+  const prgBanks = byteAt(romData, 4);
+  const chrBanks = byteAt(romData, 5);
+  const mapper = (byteAt(romData, 6) >> 4) | (byteAt(romData, 7) & 0xf0);
+  const hasTrainer = Boolean(byteAt(romData, 6) & 0x04);
+  const expectedLength = INES_HEADER_SIZE
+    + (hasTrainer ? 512 : 0)
+    + prgBanks * 16 * 1024
+    + chrBanks * 8 * 1024;
+
+  return mapper === TUNSHI_MAPPER
+    && chrBanks === TUNSHI_CHR_BANKS
+    && MMC3_CHR_RAM_PRG_BANKS.has(prgBanks)
+    && length === expectedLength;
+}
+
 export function installRomCompatibility(nes, romData) {
-  if (!isKnownTunshi640kRom(romData)) return false;
+  if (!isMmc3ChrRamExpansionRom(romData)) return false;
 
   const mapper = nes?.mmap;
   if (!mapper) return false;
