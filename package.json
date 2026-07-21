@@ -14,6 +14,8 @@
     "netplay:test": "node scripts/test-netplay-determinism.mjs",
     "latency:test": "node scripts/test-latency-policy.mjs",
     "rom-compat:test": "node scripts/test-tunshi-mapper198.mjs",
+    "postgame-runtime:test": "node scripts/test-tunshi-postgame-runtime.mjs",
+    "state-file:test": "node scripts/test-state-file.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "relay": "node relay-server/server.mjs",
     "relay:test": "node relay-server/test.mjs"

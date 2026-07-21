@@ -25,6 +25,8 @@ main.js
 | 应用启动、ROM切换、帧循环 | `src/main.js` | 创建 NES、组织各控制器、回滚联机总编排 |
 | 声音卡顿、采样率、声音开关 | `src/emulator/audio.js` | AudioContext、缓冲区、44.1/48kHz重采样、串流音轨 |
 | 特殊ROM黑屏或Mapper兼容 | `src/emulator/rom-compat.js` | 按ROM特征安装兼容层 |
+| 私有续篇ROM身份识别 | `src/emulator/tunshi-postgame-rom.js` | 66-bank头信息与双代码指纹，供兼容层和运行时共用 |
+| 《吞食天地2》片尾后继续游戏 | `src/emulator/tunshi-postgame-runtime.js` | 结局入口检查点、扩展剧情完成标记、帧间恢复和防重复触发 |
 | 分辨率、FPS帧常量 | `src/emulator/constants.js` | 模拟器屏幕和帧时序常量 |
 | A/B/AB、方向盘、键盘、连续按键 | `src/input/controller.js` | 汇总触摸和键盘输入并提供本地视觉反馈 |
 | 手柄位置、大小、透明度、横竖屏布局 | `src/input/control-layout.js` | 独立保存和编辑两套布局 |
@@ -34,6 +36,7 @@ main.js
 | 联机阈值和超时 | `src/netplay/constants.js` | RTT、回滚窗口、心跳等常量 |
 | 1P权威画面/WebRTC串流 | `src/netplay/authoritative-stream.js` | 视频音频轨道、DataChannel输入、ICE和统计 |
 | 中继地址选择错误 | `src/netplay/relay-url.js` | URL参数、部署变量、本地配置的优先级 |
+| JSON存档导入格式或校验 | `src/storage/state-file.js` | 兼容 raw jsnes，生成版本化 state/runtime 封装并校验可选 ROM SHA/长度，不操作模拟器 |
 | 按钮图标或文字 | `src/ui/buttons.js`、`src/ui/icons.js` | 按钮标签和SVG图标水合 |
 | 弹窗开关问题 | `src/ui/dialogs.js` | 菜单和设置弹窗行为 |
 | 页面元素找不到 | `src/ui/dom.js` | 所有DOM引用的唯一入口 |

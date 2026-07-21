@@ -20,6 +20,7 @@ import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputLateness, getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
+import { installTunshiPostgameRuntime } from './emulator/tunshi-postgame-runtime.js';
 import { createAudioController } from './emulator/audio.js';
 import { getRuntimeRelayUrl } from './netplay/relay-url.js';
 import { createAuthoritativeStreamSession } from './netplay/authoritative-stream.js';
@@ -38,6 +39,12 @@ import {
   NETWORK_STORAGE_KEY, NET_MODE_STORAGE_KEY, CLOUD_ACCESS_KEY_STORAGE_KEY,
   CLOUD_AUTO_BACKUP_STORAGE_KEY, CLOUD_DEVICE_ID_STORAGE_KEY, SAVE_STATE_STORAGE_KEY,
 } from './storage/keys.js';
+import {
+  assertStateRomMatches,
+  createStateEnvelope,
+  parseStatePayload,
+  readStateFile,
+} from './storage/state-file.js';
 
 hydrateIcons();
 const {
@@ -45,7 +52,7 @@ const {
   libraryBtn, menuLibraryBtn, libraryDialog, librarySearchInput, libraryStatusText, libraryResults,
   closeLibraryBtn, statusText, inviteStatusText, joinRoomForm, joinRoomInput, pauseBtn, soundBtn,
   settingsBtn, menuBtn, menuDialog, settingsDialog, closeMenuBtn, resumeBtn, resetBtn, saveStateBtn,
-  loadStateBtn, netHostBtn, relayHostBtn, relayAccessRow, relayAccessKey, netCopyBtn, netLeaveBtn,
+  loadStateBtn, importStateBtn, stateFileInput, netHostBtn, relayHostBtn, relayAccessRow, relayAccessKey, netCopyBtn, netLeaveBtn,
   netLinkInput, netStatusText, netLogBtn, netLogOutput, cloudAccessKey, cloudRememberKey,
   cloudAutoBackup, cloudSaveBtn, cloudManageBtn, cloudFavoriteBtn, cloudStatusText, cloudDialog,
   cloudDialogStatus, cloudSaveList, closeCloudBtn, layoutEditBtn, resetLayoutBtn, closeSettingsBtn,
@@ -64,6 +71,7 @@ const isStandalone = window.navigator.standalone === true || window.matchMedia('
 if (!isStandalone) document.body.classList.add('browser-mode');
 
 let nes = null;
+let tunshiPostgameRuntime = null;
 let lastRomData = null;
 let lastRomName = '';
 let lastRomLibraryPath = '';
@@ -288,7 +296,7 @@ async function uploadCloudSave({ label = '手动存档', quiet = false } = {}) {
   if (!nes) throw new Error('请先加载游戏');
   if (!quiet) cloudStatusText.textContent = '正在上传云存档...';
   const gameId = await getCurrentGameId();
-  const data = encodeNetworkState(nes.toJSON());
+  const data = encodeNetworkState(capturePortableState());
   const result = await cloudFetch('/api/saves', {
     method: 'POST',
     body: JSON.stringify({
@@ -308,8 +316,11 @@ async function loadCloudSave(id) {
   cloudDialogStatus.textContent = '正在下载并恢复云存档...';
   const save = await cloudFetch(`/api/saves/${id}`);
   releaseAllButtons();
-  nes.fromJSON(decodeNetworkState(save.data));
-  gameFrame = Math.max(0, Number(save.gameFrame) || 0);
+  const restored = restorePortableState(decodeNetworkState(save.data));
+  const cloudFrame = Number(save.gameFrame);
+  gameFrame = Number.isFinite(cloudFrame) && cloudFrame >= 0
+    ? Math.floor(cloudFrame)
+    : restored.gameFrame;
   resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
   showGame();
   running = true;
@@ -381,7 +392,7 @@ function saveGameState() {
     return;
   }
   try {
-    localStorage.setItem(getSaveStateKey(), JSON.stringify(nes.toJSON()));
+    localStorage.setItem(getSaveStateKey(), JSON.stringify(capturePortableState()));
     setStatus('游戏已保存');
     menuDialog.close();
     if (cloudAutoBackup?.checked && getCloudAccessKey()) {
@@ -407,7 +418,11 @@ function loadGameState() {
       return;
     }
     releaseAllButtons();
-    nes.fromJSON(JSON.parse(raw));
+    const restored = restorePortableState(JSON.parse(raw));
+    gameFrame = restored.gameFrame;
+    syncButtonSetsFromNes();
+    releaseAllButtons();
+    resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
     showGame();
     running = true;
     paused = false;
@@ -420,6 +435,57 @@ function loadGameState() {
     console.error(error);
     alert('加载失败，存档可能已损坏。');
   }
+}
+
+async function importGameStateFile(file) {
+  if (!nes) throw new Error('请先加载与存档对应的 ROM');
+  const imported = await readStateFile(file);
+  const currentRomBytes = binaryStringToArrayBuffer(lastRomData).byteLength;
+  const identityVerified = imported.rom
+    ? assertStateRomMatches(imported, {
+        sha256: await getCurrentGameId(),
+        bytes: currentRomBytes,
+      })
+    : false;
+  if (!identityVerified && !confirm('这个 JSON 存档没有 ROM 身份信息，无法自动确认是否属于当前游戏。仅在来源可信、且已加载对应 ROM 时继续。')) {
+    throw new Error('已取消导入未校验的存档');
+  }
+  releaseAllButtons();
+
+  const previousState = captureDeterministicState(nes);
+  const previousFrame = gameFrame;
+  const previousPostgameState = tunshiPostgameRuntime?.exportState({ includeCheckpoint: true });
+  try {
+    restoreDeterministicState(nes, imported.state, { preserveLocalAudio: true });
+    if (tunshiPostgameRuntime) {
+      if (imported.postgameRuntime) tunshiPostgameRuntime.importState(imported.postgameRuntime);
+      else tunshiPostgameRuntime.resetForLoadedState();
+    }
+    gameFrame = imported.gameFrame;
+    syncButtonSetsFromNes();
+    releaseAllButtons();
+    resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
+  } catch (error) {
+    // fromJSON() resets the live NES before applying fields. If an invalid or
+    // wrong-version file fails halfway through, restore the pre-import session
+    // instead of leaving the user with a partially reset emulator.
+    restoreDeterministicState(nes, previousState, { preserveLocalAudio: true });
+    tunshiPostgameRuntime?.importState(previousPostgameState);
+    gameFrame = previousFrame;
+    syncButtonSetsFromNes();
+    releaseAllButtons();
+    resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
+    throw error;
+  }
+
+  showGame();
+  running = true;
+  paused = false;
+  setButtonIcon(pauseBtn, 'pause', '暂停');
+  menuDialog.close();
+  startLoop();
+  setStatus(`已导入存档：${file.name || 'JSON 文件'}`);
+  if (networkRole === 'host' && peerConnected) sendPeerSnapshot();
 }
 
 function getSafeNetworkDetail(detail = {}) {
@@ -659,16 +725,45 @@ function base64ToBytes(value) {
   return bytes;
 }
 
-function encodeNetworkState(state) {
+function capturePostgameRuntimeState() {
+  return tunshiPostgameRuntime?.exportState({ includeCheckpoint: true }) || null;
+}
+
+function capturePortableState() {
+  return createStateEnvelope({
+    state: captureDeterministicState(nes),
+    gameFrame,
+    postgameRuntime: capturePostgameRuntimeState(),
+  });
+}
+
+function restorePortableState(payload, {
+  preserveLocalAudio = true,
+  requirePostgameRuntime = false,
+} = {}) {
+  const parsed = parseStatePayload(payload);
+  if (requirePostgameRuntime && tunshiPostgameRuntime && !parsed.postgameRuntime) {
+    throw new Error('联机快照缺少续篇运行状态，请刷新双方页面后重新加入');
+  }
+  restoreDeterministicState(nes, parsed.state, { preserveLocalAudio });
+  if (tunshiPostgameRuntime) {
+    if (parsed.postgameRuntime) tunshiPostgameRuntime.importState(parsed.postgameRuntime);
+    else tunshiPostgameRuntime.resetForLoadedState();
+  }
+  return parsed;
+}
+
+function encodeNetworkState(payload) {
   // These PPU arrays are either deterministic lookup tables or temporary
   // render targets. Rebuilding/reusing them on the guest cuts a typical
   // compressed snapshot from about 100 KB to about 40 KB without removing
   // CPU, mapper, controller, VRAM, sprite, or audio state.
+  const state = payload?.state || payload;
   delete state.ppu?.vramMirrorTable;
   delete state.ppu?.buffer;
   delete state.ppu?.bgbuffer;
   delete state.ppu?.pixrendered;
-  return bytesToBase64(gzipSync(strToU8(JSON.stringify(state)), { level: 9 }));
+  return bytesToBase64(gzipSync(strToU8(JSON.stringify(payload)), { level: 9 }));
 }
 
 function decodeNetworkState(value) {
@@ -918,12 +1013,27 @@ function resetRollbackState({ capture = false, preserveInputsFromFrame = null } 
   rebuildScheduledNetworkInputs(gameFrame);
 }
 
-function hashRollbackState(state) {
-  return hashDeterministicState(state);
+function summarizePostgameRuntime(state) {
+  if (!state) return '';
+  const checkpointHash = state.checkpoint ? hashDeterministicState(state.checkpoint) : '';
+  return `${state.phase || 'armed'}:${state.completed ? 1 : 0}:${checkpointHash}`;
+}
+
+function hashRollbackSnapshot(snapshot) {
+  const stateHash = hashDeterministicState(snapshot.state);
+  const runtimeHash = summarizePostgameRuntime(snapshot.postgameRuntime);
+  return runtimeHash ? `${stateHash}:${runtimeHash}` : stateHash;
+}
+
+function rollbackSnapshotComponents(snapshot) {
+  const components = hashDeterministicComponents(snapshot.state);
+  const runtimeHash = summarizePostgameRuntime(snapshot.postgameRuntime);
+  if (runtimeHash) components.postgameRuntime = runtimeHash;
+  return components;
 }
 
 function compareRollbackStateCheck(snapshot, expectedHash, expectedComponents = null) {
-  const actualHash = snapshot.hash || (snapshot.hash = hashRollbackState(snapshot.state));
+  const actualHash = snapshot.hash || (snapshot.hash = hashRollbackSnapshot(snapshot));
   const match = actualHash === expectedHash;
   const details = {
     frame: snapshot.frame,
@@ -931,7 +1041,7 @@ function compareRollbackStateCheck(snapshot, expectedHash, expectedComponents = 
     actualHash,
   };
   if (!match && expectedComponents) {
-    const actualComponents = hashDeterministicComponents(snapshot.state);
+    const actualComponents = rollbackSnapshotComponents(snapshot);
     details.componentDiffs = Object.keys(expectedComponents).filter(
       (name) => expectedComponents[name] !== actualComponents[name],
     );
@@ -960,8 +1070,8 @@ function processRollbackStateCheck(snapshot) {
     ));
     if (!stableSnapshot) return;
     lastStateCheckFrame = stableSnapshot.frame;
-    const hash = stableSnapshot.hash || (stableSnapshot.hash = hashRollbackState(stableSnapshot.state));
-    const components = hashDeterministicComponents(stableSnapshot.state);
+    const hash = stableSnapshot.hash || (stableSnapshot.hash = hashRollbackSnapshot(stableSnapshot));
+    const components = rollbackSnapshotComponents(stableSnapshot);
     sendPeerMessage({ type: 'state-check', frame: stableSnapshot.frame, hash, components });
     logNetworkEvent('state-check-send', { frame: stableSnapshot.frame, hash, components });
     return;
@@ -972,12 +1082,36 @@ function processRollbackStateCheck(snapshot) {
   }
 }
 
-function captureRollbackState() {
-  return captureDeterministicState(nes);
+function restoreRollbackSnapshot(snapshot) {
+  restoreDeterministicState(nes, snapshot.state);
+  if (tunshiPostgameRuntime) {
+    if (snapshot.postgameRuntime) tunshiPostgameRuntime.importState(snapshot.postgameRuntime);
+    else tunshiPostgameRuntime.resetForLoadedState();
+  }
 }
 
-function restoreRollbackState(state) {
-  restoreDeterministicState(nes, state);
+function handleTunshiPostgameContinuation() {
+  const continuedNes = nes;
+  // Let the caller finish its gameFrame increment first. This keeps network
+  // snapshot labels aligned with the restored emulator state.
+  queueMicrotask(() => {
+    if (nes !== continuedNes) return;
+    clearAudioBuffer();
+    resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
+    logNetworkEvent('tunshi-postgame-continued', { frame: gameFrame });
+    setStatus('大结局与续篇序章已完成，现在可以保留通关进度继续行动');
+    if (networkRole === 'host' && peerConnected) sendPeerSnapshot();
+  });
+}
+
+function runEmulatorFrame() {
+  nes.frame();
+  // Restoring a jsnes snapshot replaces CPU/PPU objects. It must happen only
+  // after frame() has returned, never inside rollback replay's frame-local
+  // execution loop.
+  if (!rollbackInProgress && tunshiPostgameRuntime?.afterFrame()) {
+    handleTunshiPostgameContinuation();
+  }
 }
 
 function captureRollbackSnapshot(force = false) {
@@ -987,7 +1121,8 @@ function captureRollbackSnapshot(force = false) {
   if (existing) return existing;
   const snapshot = {
     frame: gameFrame,
-    state: captureRollbackState(),
+    state: captureDeterministicState(nes),
+    postgameRuntime: capturePostgameRuntimeState(),
     buttons: {
       1: Array.from(buttonStateByPlayer[1]),
       2: Array.from(buttonStateByPlayer[2]),
@@ -1036,14 +1171,14 @@ function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
   suppressEmulatorOutput = true;
   try {
     rollbackSnapshots = rollbackSnapshots.filter((candidate) => candidate.frame <= snapshot.frame);
-    restoreRollbackState(snapshot.state);
+    restoreRollbackSnapshot(snapshot);
     gameFrame = snapshot.frame;
     restoreRollbackButtons(snapshot);
     rebuildScheduledNetworkInputs(gameFrame);
     while (gameFrame < endFrame) {
       captureRollbackSnapshot();
       applyScheduledNetworkInputs();
-      nes.frame();
+      runEmulatorFrame();
       gameFrame++;
     }
   } catch (error) {
@@ -1055,6 +1190,10 @@ function rollbackNetworkToFrame(targetFrame, reason = 'late-input') {
     suppressEmulatorOutput = previousSuppressOutput;
     syncButtonVisuals();
   }
+  // If replay crossed the postgame completion marker, restore immediately at
+  // this safe frame boundary instead of executing one extra visible frame on
+  // the temporary credits timeline.
+  if (tunshiPostgameRuntime?.afterFrame()) handleTunshiPostgameContinuation();
   logNetworkEvent('rollback-complete', {
     reason,
     fromFrame: endFrame,
@@ -1149,7 +1288,7 @@ function applyScheduledNetworkInputs() {
 function sendPeerSnapshot(syncId = '') {
   if (networkRole !== 'host' || !nes || !peerConnected) return;
   try {
-    const encodedState = encodeNetworkState(captureDeterministicState(nes));
+    const encodedState = encodeNetworkState(capturePortableState());
     logNetworkEvent('state-send', { syncId: syncId || 'none', base64Bytes: encodedState.length, frame: gameFrame });
     sendPeerMessage({
       type: 'state-gzip',
@@ -1250,7 +1389,7 @@ function fastForwardNetworkToFrame(targetFrame) {
     while (gameFrame < finalTarget) {
       captureRollbackSnapshot();
       applyScheduledNetworkInputs();
-      nes.frame();
+      runEmulatorFrame();
       gameFrame++;
     }
   } finally {
@@ -1707,8 +1846,13 @@ function handleNetworkMessage(message) {
     try {
       logNetworkEvent('state-received', { syncId: message.syncId || 'none', base64Bytes: String(message.data || '').length, frame: message.frame });
       suppressNetworkBroadcast = true;
-      restoreDeterministicState(nes, decodeNetworkState(message.data), { preserveLocalAudio: true });
-      gameFrame = Number(message.frame) || 0;
+      const restored = restorePortableState(decodeNetworkState(message.data), {
+        requirePostgameRuntime: true,
+      });
+      const messageFrame = Number(message.frame);
+      gameFrame = Number.isFinite(messageFrame) && messageFrame >= 0
+        ? Math.floor(messageFrame)
+        : restored.gameFrame;
       syncButtonSetsFromNes();
       resetRollbackState({ capture: true, preserveInputsFromFrame: gameFrame });
       networkSyncPaused = true;
@@ -1729,8 +1873,20 @@ function handleNetworkMessage(message) {
   if (message.type === 'state' && nes && networkRole === 'guest') {
     try {
       suppressNetworkBroadcast = true;
-      nes.fromJSON(message.state);
-      gameFrame = Number(message.frame) || 0;
+      const restored = restorePortableState(
+        message.postgameRuntime
+          ? createStateEnvelope({
+              state: message.state,
+              gameFrame: message.frame,
+              postgameRuntime: message.postgameRuntime,
+            })
+          : message.state,
+        { requirePostgameRuntime: true },
+      );
+      const messageFrame = Number(message.frame);
+      gameFrame = Number.isFinite(messageFrame) && messageFrame >= 0
+        ? Math.floor(messageFrame)
+        : restored.gameFrame;
       syncButtonSetsFromNes();
       resetRollbackState({ capture: true, preserveInputsFromFrame: gameFrame });
       syncButtonVisuals();
@@ -2445,9 +2601,22 @@ function startRom(romData, name = 'NES 游戏') {
     stopLoop();
     releaseAllButtons();
     clearAudioBuffer();
+    tunshiPostgameRuntime?.dispose();
+    tunshiPostgameRuntime = null;
     nes = createNES();
     nes.loadROM(romData);
     installRomCompatibility(nes, romData);
+    tunshiPostgameRuntime = installTunshiPostgameRuntime(nes, romData, {
+      onEvent(event) {
+        if (event.type === 'checkpoint-captured') {
+          setStatus('已保存大结局前进度，正在播放原版片尾...');
+        } else if (event.type === 'phase-change' && event.phase === 'epilogue') {
+          setStatus('原版大结局已结束，正在进入续篇序章...');
+        } else if (event.type === 'restore-error') {
+          setStatus(`续篇恢复失败：${event.message || '请读取大结局前存档重试'}`);
+        }
+      },
+    });
     gameFrame = 0;
     resetRollbackState({ capture: true });
     lastQueuedLocalButtons = new Set();
@@ -2598,7 +2767,7 @@ function loop(timestamp) {
       for (let index = 0; index < catchUpFrames; index++) {
         captureRollbackSnapshot();
         applyScheduledNetworkInputs();
-        nes.frame();
+        runEmulatorFrame();
         gameFrame++;
       }
     } finally {
@@ -2620,7 +2789,7 @@ function loop(timestamp) {
       captureRollbackSnapshot();
       applyScheduledNetworkInputs();
     }
-    nes.frame();
+    runEmulatorFrame();
     gameFrame++;
     performanceHudFrames++;
     elapsed -= FRAME_MS;
@@ -2737,6 +2906,24 @@ resetBtn.addEventListener('click', () => {
 });
 saveStateBtn.addEventListener('click', saveGameState);
 loadStateBtn.addEventListener('click', loadGameState);
+importStateBtn.addEventListener('click', () => {
+  if (!nes) {
+    alert('请先加载与存档对应的 ROM');
+    return;
+  }
+  stateFileInput.click();
+});
+stateFileInput.addEventListener('change', () => {
+  const [file] = stateFileInput.files || [];
+  if (!file) return;
+  importGameStateFile(file).catch((error) => {
+    console.error(error);
+    alert(`导入失败：${error.message || '请确认存档与当前 ROM 相匹配'}`);
+  }).finally(() => {
+    // Allow selecting the same file again after a failed import.
+    stateFileInput.value = '';
+  });
+});
 cloudSaveBtn.addEventListener('click', () => {
   uploadCloudSave().then(() => menuDialog.close()).catch((error) => {
     cloudStatusText.textContent = error.message || '云存档上传失败';

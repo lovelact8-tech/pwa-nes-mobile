@@ -11,6 +11,7 @@ export const ui = Object.freeze({
   pauseBtn: byId('pauseBtn'), soundBtn: byId('soundBtn'), settingsBtn: byId('settingsBtn'), menuBtn: byId('menuBtn'),
   menuDialog: byId('menuDialog'), settingsDialog: byId('settingsDialog'), closeMenuBtn: byId('closeMenuBtn'),
   resumeBtn: byId('resumeBtn'), resetBtn: byId('resetBtn'), saveStateBtn: byId('saveStateBtn'), loadStateBtn: byId('loadStateBtn'),
+  importStateBtn: byId('importStateBtn'), stateFileInput: byId('stateFileInput'),
   netHostBtn: byId('netHostBtn'), relayHostBtn: byId('relayHostBtn'), relayAccessRow: byId('relayAccessRow'),
   relayAccessKey: byId('relayAccessKey'), netCopyBtn: byId('netCopyBtn'), netLeaveBtn: byId('netLeaveBtn'),
   netLinkInput: byId('netLinkInput'), netStatusText: byId('netStatusText'), netLogBtn: byId('netLogBtn'), netLogOutput: byId('netLogOutput'),

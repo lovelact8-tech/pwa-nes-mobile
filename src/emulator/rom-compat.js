@@ -1,9 +1,15 @@
+import { isKnownTunshiPostgameRom } from './tunshi-postgame-rom.js';
+
 const INES_HEADER_SIZE = 16;
 const TUNSHI_PRG_BANKS = 40;
 const TUNSHI_CHR_BANKS = 0;
 const TUNSHI_MAPPER = 4;
 const TUNSHI_ROM_SIZE = 655376;
+// 40 = original 640KB translation and 64 = user's 1MB revision. The private
+// 66-bank postgame build is accepted separately only after its two code
+// fingerprints match; an unrelated 66-bank Mapper 4 ROM must stay untouched.
 const MMC3_CHR_RAM_PRG_BANKS = new Set([40, 64]);
+const TUNSHI_POSTGAME_PRG_BANKS = 66;
 const EXPANSION_RAM_START = 0x5000;
 const EXPANSION_RAM_END = 0x5fff;
 
@@ -45,9 +51,12 @@ export function isMmc3ChrRamExpansionRom(romData) {
     + prgBanks * 16 * 1024
     + chrBanks * 8 * 1024;
 
+  const knownPrgLayout = MMC3_CHR_RAM_PRG_BANKS.has(prgBanks)
+    || (prgBanks === TUNSHI_POSTGAME_PRG_BANKS && isKnownTunshiPostgameRom(romData));
+
   return mapper === TUNSHI_MAPPER
     && chrBanks === TUNSHI_CHR_BANKS
-    && MMC3_CHR_RAM_PRG_BANKS.has(prgBanks)
+    && knownPrgLayout
     && length === expectedLength;
 }
 
