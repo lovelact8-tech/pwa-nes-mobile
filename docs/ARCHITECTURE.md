@@ -25,9 +25,8 @@ main.js
 | 应用启动、ROM切换、帧循环 | `src/main.js` | 创建 NES、组织各控制器、回滚联机总编排 |
 | 声音卡顿、采样率、声音开关 | `src/emulator/audio.js` | AudioContext、缓冲区、44.1/48kHz重采样、串流音轨 |
 | 特殊ROM黑屏或Mapper兼容 | `src/emulator/rom-compat.js` | 按ROM特征安装兼容层 |
-| 私有续篇ROM身份识别 | `src/emulator/tunshi-postgame-rom.js` | 稳定128-bank布局（兼容旧66-bank原型）与多重代码指纹，供兼容层和运行时共用 |
-| 《吞食天地2》续篇直达 | `src/emulator/tunshi-postgame-boot.js` | 校验完整结局检查点、恢复全机状态、跳过旧片尾并从安全RAM页启动新章 |
-| 《吞食天地2》片尾后继续游戏 | `src/emulator/tunshi-postgame-runtime.js` | 结局边界、扩展剧情完成标记、帧间恢复和防重复触发 |
+| M198 扩展卡带 | `src/emulator/rom-compat.js` | 只实现扩展RAM、CHR-RAM和PRG bank协议；不识别剧情、人物或开局 |
+| 旧续篇ROM兼容（只读遗留） | `src/emulator/tunshi-postgame-*.js` | 仅让v0.4及更旧测试版可迁移；v0.5起不再依赖这些网页运行时 |
 | 分辨率、FPS帧常量 | `src/emulator/constants.js` | 模拟器屏幕和帧时序常量 |
 | 1×/2×/4×/6×/8×加速 | `src/emulator/playback-speed.js` | 档位校验、记忆设置、联机1×锁定和速度界面状态 |
 | A/B/AB、方向盘、键盘、连续按键 | `src/input/controller.js` | 汇总触摸和键盘输入并提供本地视觉反馈 |
@@ -61,8 +60,8 @@ main.js
 
 ## 《吞食天地2：汉室新章》兼容边界
 
-私人续篇 v0.2 使用 128 × 16KB PRG 的幂次布局。该游戏会写入完整的 8 位 MMC3 bank 值；`$82-$FD` 必须镜像其原始 7 位别名，`$FE/$FF` 必须落到真正的两个固定 bank。不得恢复为 66 × 16KB 的非幂次布局，否则 jsnes 取模后会把 `$FE/$FF` 映射成错误 bank，战斗小人和相关图形会花屏。
+v0.5 是自包含卡带：标题、首次确认、新章初始化、剧情数据和完成后返回都在 `.nes` 内。模拟器只看 iNES 头的 `M198` 硬件标记并提供固定的 Mapper 198 扩展协议，不读取游戏名、剧情指纹或网页检查点。以后修改文字、人物、地图、战斗和开局，只重建 ROM。
 
-续篇不能仅恢复一部分 RAM 后修改 PC。`tunshi-postgame-boot.js` 先恢复确定性的完整检查点，校验 `$F386` 指令边界与固定 bank 指纹，再将短剧情驱动复制到已验证为空的 `$7F00-$7FFF`。原版会把 `$5000-$5FFF` 当扩展 RAM 写入并执行，续篇代码不得占用该区间。
+2 MiB ROM 必须让 `$FE/$FF` 保持为物理固定 bank。它们不是写入 MMC3 可切换寄存器的值，不能套用 Mapper 198 的 `$50-$FF` 别名掩码；错误归一化会把标题代码映射到 `$4E/$4F`，造成有声音但灰屏。卡带需要访问物理扩展 bank 时，写 `$5FF0=$4D`、`$5FF1=$98`；退出时写两个零。协议状态进入 Mapper JSON，因此本地存档和联机回滚使用同一状态。
 
-特殊逻辑只在严格匹配已登记 ROM 后启用：640KB 与 1MB 底版使用完整文件 FNV-1a 门控并由发布 SHA-256 复核；稳定续篇使用长度、Mapper、固定入口、bootstrap 和驱动多重指纹。普通 Mapper 4 ROM、无关的 128-bank ROM、指纹损坏文件和旧 66-bank 原型均保持原行为；旧原型只提示升级，不能进入续篇运行时。
+640KB/1MB 同能网底版仍保留严格指纹兼容，防止影响普通 Mapper 4 ROM。旧 v0.4 续篇的网页运行时仅为历史文件保留，新 v0.5 明确排除该运行时；新功能不得继续加入旧适配器。更详细的边界见 `docs/rom-emulator-boundary.md`。
