@@ -14,6 +14,7 @@
     "netplay:test": "node scripts/test-netplay-determinism.mjs",
     "latency:test": "node scripts/test-latency-policy.mjs",
     "rom-compat:test": "node scripts/test-tunshi-mapper198.mjs",
+    "rom-diagnostics:test": "node scripts/test-rom-diagnostics.mjs",
     "native-cartridge:test": "node scripts/test-native-m198-cartridge.mjs",
     "postgame-runtime:test": "node scripts/test-tunshi-postgame-runtime.mjs",
     "postgame-boot:test": "node scripts/test-tunshi-postgame-boot.mjs",

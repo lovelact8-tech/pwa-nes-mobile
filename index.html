@@ -152,6 +152,13 @@
           </section>
 
           <section class="menuSection">
+            <h3 data-icon="search">ROM 兼容诊断</h3>
+            <p class="networkStatus">自动记录文件头、Mapper、校验值、兼容层、崩溃帧与 CPU 位置，不包含 ROM 内容。</p>
+            <button id="romLogBtn" type="button" class="textAction">复制 ROM 诊断日志</button>
+            <details class="networkLogDetails"><summary>查看 ROM 日志</summary><pre id="romLogOutput" aria-live="polite">尚未加载 ROM</pre></details>
+          </section>
+
+          <section class="menuSection">
             <h3 data-icon="users">双人联机</h3>
             <div class="menuGrid">
               <button id="netHostBtn" class="menuAction" data-icon="wifi"><span><strong>直连房间</strong><small>同网络优先</small></span></button>

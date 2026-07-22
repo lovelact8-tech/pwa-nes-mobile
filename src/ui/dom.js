@@ -15,6 +15,7 @@ export const ui = Object.freeze({
   formationBtn: byId('formationBtn'), formationDialog: byId('formationDialog'), closeFormationBtn: byId('closeFormationBtn'),
   cancelFormationBtn: byId('cancelFormationBtn'), confirmFormationBtn: byId('confirmFormationBtn'),
   formationRoster: byId('formationRoster'), formationStatus: byId('formationStatus'),
+  romLogBtn: byId('romLogBtn'), romLogOutput: byId('romLogOutput'),
   netHostBtn: byId('netHostBtn'), relayHostBtn: byId('relayHostBtn'), relayAccessRow: byId('relayAccessRow'),
   relayAccessKey: byId('relayAccessKey'), netCopyBtn: byId('netCopyBtn'), netLeaveBtn: byId('netLeaveBtn'),
   netLinkInput: byId('netLinkInput'), netStatusText: byId('netStatusText'), netLogBtn: byId('netLogBtn'), netLogOutput: byId('netLogOutput'),

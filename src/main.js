@@ -21,6 +21,7 @@ import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputLateness, getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
+import { createRomDiagnostics } from './emulator/rom-diagnostics.js';
 import { createTunshiFormationController } from './ui/tunshi-formation.js';
 import { createFrameTransitionGuard } from './emulator/frame-transition-guard.js';
 import {
@@ -63,6 +64,7 @@ const {
   settingsBtn, menuBtn, menuDialog, settingsDialog, closeMenuBtn, resumeBtn, resetBtn, saveStateBtn,
   loadStateBtn, importStateBtn, stateFileInput, netHostBtn, relayHostBtn, relayAccessRow, relayAccessKey, netCopyBtn, netLeaveBtn,
   formationBtn, formationDialog, closeFormationBtn, cancelFormationBtn, confirmFormationBtn, formationRoster, formationStatus,
+  romLogBtn, romLogOutput,
   netLinkInput, netStatusText, netLogBtn, netLogOutput, cloudAccessKey, cloudRememberKey,
   cloudAutoBackup, cloudSaveBtn, cloudManageBtn, cloudFavoriteBtn, cloudStatusText, cloudDialog,
   cloudDialogStatus, cloudSaveList, closeCloudBtn, layoutEditBtn, resetLayoutBtn, closeSettingsBtn,
@@ -74,6 +76,7 @@ const ctx = canvas.getContext('2d');
 const imageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 const frameBuffer32 = new Uint32Array(imageData.data.buffer);
 const frameTransitionGuard = createFrameTransitionGuard();
+const romDiagnostics = createRomDiagnostics({ output: romLogOutput });
 const dialogController = createDialogController({
   settingsDialog,
   dismissibleDialogs: [menuDialog, libraryDialog, cloudDialog, formationDialog],
@@ -224,6 +227,7 @@ const streamSession = createAuthoritativeStreamSession({
 
 function setStatus(text) {
   statusText.textContent = text;
+  romDiagnostics.status(text);
 }
 
 const formationController = createTunshiFormationController({
@@ -1155,7 +1159,15 @@ function handleTunshiPostgameContinuation() {
 }
 
 function runEmulatorFrame() {
-  nes.frame();
+  try {
+    nes.frame();
+    romDiagnostics.frame(nes, gameFrame);
+  } catch (error) {
+    romDiagnostics.error(error, { phase: 'frame' });
+    running = false;
+    setStatus(`运行失败：${formatRomLoadError(error)}`);
+    throw error;
+  }
   // Restoring a jsnes snapshot replaces CPU/PPU objects. It must happen only
   // after frame() has returned, never inside rollback replay's frame-local
   // execution loop.
@@ -2646,6 +2658,11 @@ function formatRomLoadError(error) {
 
 async function startRom(romData, name = 'NES 游戏') {
   try {
+    romDiagnostics.start({
+      name,
+      data: romData,
+      source: lastRomLibraryPath ? 'game-library' : networkRole === 'guest' ? 'netplay' : 'local-file',
+    });
     formationController.setEnabled(false);
     if (isLegacyTunshiPostgameRom(romData)) {
       throw new Error('检测到汉室新章 v0.1：该旧版使用非幂次 PRG 布局，会造成战斗花屏。请改用 v0.2 一键体验版。');
@@ -2662,7 +2679,11 @@ async function startRom(romData, name = 'NES 游戏') {
     frameTransitionGuard.reset();
     nes = createNES();
     nes.loadROM(romData);
-    installRomCompatibility(nes, romData);
+    const compatibilityInstalled = installRomCompatibility(nes, romData);
+    romDiagnostics.attach(nes, {
+      compatibilityInstalled,
+      postgameRom: isKnownTunshiPostgameRom(romData),
+    });
     formationController.setEnabled(Boolean(nes.mmap?.__tunshiPostgameBankAlias));
     tunshiPostgameRuntime = installTunshiPostgameRuntime(nes, romData, {
       onEvent(event) {
@@ -2709,6 +2730,7 @@ async function startRom(romData, name = 'NES 游戏') {
     updateCloudLibraryActivity({ incrementPlay: true }).catch(() => {});
   } catch (error) {
     console.error(error);
+    romDiagnostics.error(error, { phase: 'load' });
     const detail = formatRomLoadError(error);
     setStatus(`加载失败：${detail}`);
     alert(`加载失败：${detail}`);
@@ -3067,6 +3089,27 @@ netLogBtn.addEventListener('click', async () => {
     document.execCommand('copy');
     textarea.remove();
     setNetworkText('联机诊断日志已复制');
+  }
+});
+romLogBtn?.addEventListener('click', async () => {
+  romDiagnostics.event('diagnostic-log-copy');
+  await romDiagnostics.waitForHash();
+  const log = romDiagnostics.getLog();
+  try {
+    await navigator.clipboard.writeText(log);
+    setStatus('ROM 诊断日志已复制');
+  } catch (error) {
+    console.warn(error);
+    const textarea = document.createElement('textarea');
+    textarea.value = log;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+    setStatus('ROM 诊断日志已复制');
   }
 });
 netLeaveBtn.addEventListener('click', () => {
