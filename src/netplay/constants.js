@@ -4,7 +4,7 @@ export const NET_INPUT_DELAY_FRAMES = 1;
 // edge for the guest's next local frame made a healthy 30 ms route arrive one
 // or two frames late, forcing the host to replay on every rapid tap.
 export const GUEST_INPUT_MIN_LEAD_FRAMES = 2;
-export const GUEST_INPUT_MAX_LEAD_FRAMES = 4;
+export const GUEST_INPUT_MAX_LEAD_FRAMES = 3;
 // Stable routes can deliberately arrive up to one frame late and let rollback
 // repair that edge. This removes one frame of 2P input delay without applying
 // the aggressive policy to a jittery mobile/Wi-Fi route.
@@ -17,8 +17,8 @@ export const GUEST_INPUT_SAFETY_DECAY_MS = 15000;
 // Rollback remains cheaper than delaying every 2P edge on a healthy mobile or
 // Tailscale path. Above this range, buffering is safer because replay bursts
 // become large enough to disturb audio and rendering.
-export const GUEST_ROLLBACK_MAX_RTT_MS = 90;
-export const GUEST_ROLLBACK_MAX_JITTER_MS = 20;
+export const GUEST_ROLLBACK_MAX_RTT_MS = 120;
+export const GUEST_ROLLBACK_MAX_JITTER_MS = 28;
 export const NET_CLOCK_INTERVAL_MS = 100;
 export const NETWORK_PING_IDLE_MS = 1000;
 export const NETWORK_PING_BOOTSTRAP_MS = 500;
@@ -29,7 +29,7 @@ export const DEFAULT_NETWORK_RTT_MS = 250;
 export const RELAY_MIN_JITTER_BUFFER_MS = 8;
 export const RELAY_MAX_JITTER_BUFFER_MS = 50;
 export const RELAY_MIN_GUEST_BUFFER_FRAMES = 1;
-export const RELAY_MAX_GUEST_BUFFER_FRAMES = 4;
+export const RELAY_MAX_GUEST_BUFFER_FRAMES = 3;
 // requestAnimationFrame and timers can briefly pause while Safari/Chrome opens
 // share sheets, address bars or system overlays. 750ms caused a healthy 30ms
 // Tailscale route to be declared dead and left the guest frozen.

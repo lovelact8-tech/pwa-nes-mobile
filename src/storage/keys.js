@@ -8,3 +8,4 @@ export const CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v2';
 export const LEGACY_CONTROL_LAYOUT_STORAGE_KEY = 'pwa-nes-control-layout-v1';
 export const CONTROL_OPACITY_STORAGE_KEY = 'pwa-nes-control-opacity-v1';
 export const SAVE_STATE_STORAGE_KEY = 'pwa-nes-save-state-v1';
+export const PLAYBACK_SPEED_STORAGE_KEY = 'pwa-nes-playback-speed-v1';
