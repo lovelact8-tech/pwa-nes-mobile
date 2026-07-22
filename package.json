@@ -16,6 +16,7 @@
     "rom-compat:test": "node scripts/test-tunshi-mapper198.mjs",
     "postgame-runtime:test": "node scripts/test-tunshi-postgame-runtime.mjs",
     "postgame-boot:test": "node scripts/test-tunshi-postgame-boot.mjs",
+    "postgame-autoboot:test": "node scripts/test-tunshi-postgame-autoboot.mjs",
     "transition-guard:test": "node scripts/test-frame-transition-guard.mjs",
     "controls:test": "node scripts/test-controls.mjs",
     "state-file:test": "node scripts/test-state-file.mjs",

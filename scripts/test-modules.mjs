@@ -160,6 +160,12 @@ assert.deepEqual(bankLoads, [
 assert.equal(setTunshiPostgameExtensionBanks(postgameNes, true), true);
 postgameMapper.load8kRomBank(0x80, 0x8000);
 postgameMapper.load8kRomBank(0x81, 0xa000);
+assert.deepEqual(bankLoads.slice(-4), [
+  { bank: 0xfe, address: 0xc000 },
+  { bank: 0xff, address: 0xe000 },
+  { bank: 0x80, address: 0x8000 },
+  { bank: 0x81, address: 0xa000 },
+], '启用续篇 bank 后必须同时重载 $C000/$E000 固定 bank');
 assert.deepEqual(bankLoads.slice(-2), [
   { bank: 0x80, address: 0x8000 },
   { bank: 0x81, address: 0xa000 },

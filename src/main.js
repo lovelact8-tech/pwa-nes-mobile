@@ -28,6 +28,7 @@ import {
   isLegacyTunshiPostgameRom,
 } from './emulator/tunshi-postgame-rom.js';
 import { installTunshiPostgameRuntime } from './emulator/tunshi-postgame-runtime.js';
+import { autoBootTunshiPostgame } from './emulator/tunshi-postgame-autoboot.js';
 import { createAudioController } from './emulator/audio.js';
 import { createPlaybackSpeedController, getPlaybackFrameLimit } from './emulator/playback-speed.js';
 import { getRuntimeRelayUrl } from './netplay/relay-url.js';
@@ -84,6 +85,7 @@ if (!isStandalone) document.body.classList.add('browser-mode');
 
 let nes = null;
 let tunshiPostgameRuntime = null;
+let romLoadSequence = 0;
 let lastRomData = null;
 let lastRomName = '';
 let lastRomLibraryPath = '';
@@ -2644,7 +2646,8 @@ function formatRomLoadError(error) {
   return message || '请确认这是标准 iNES 格式的 .nes 文件。';
 }
 
-function startRom(romData, name = 'NES 游戏') {
+async function startRom(romData, name = 'NES 游戏') {
+  const loadSequence = ++romLoadSequence;
   try {
     formationController.setEnabled(false);
     if (isLegacyTunshiPostgameRom(romData)) {
@@ -2675,6 +2678,13 @@ function startRom(romData, name = 'NES 游戏') {
         }
       },
     });
+    let postgameAutoBooted = false;
+    if (tunshiPostgameRuntime && networkRole !== 'guest') {
+      setStatus('正在载入汉室新章起点...');
+      await autoBootTunshiPostgame(nes, romData, tunshiPostgameRuntime);
+      if (loadSequence !== romLoadSequence) return;
+      postgameAutoBooted = true;
+    }
     // Paint one emulator frame immediately. requestAnimationFrame can be
     // suspended while a mobile file picker is closing or while an installed
     // PWA is returning to the foreground; without this first frame the canvas
@@ -2701,7 +2711,7 @@ function startRom(romData, name = 'NES 游戏') {
     running = true;
     paused = false;
     setButtonIcon(pauseBtn, 'pause', '暂停');
-    setStatus(`正在玩：${name}`);
+    setStatus(`正在玩：${name}${postgameAutoBooted ? '（已直达汉室新章）' : ''}`);
     if (networkRole === 'host' && peerConnected && lastRomData && !isAuthoritativeStreamMode()) {
       sendCurrentRomToPeer();
     }
