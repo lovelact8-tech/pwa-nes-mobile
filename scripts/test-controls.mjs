@@ -31,4 +31,26 @@ assert.deepEqual(
 const neutral = mapGamepadToNesButtons({ buttons: [], axes: [0.1, -0.1] });
 assert.equal(neutral.size, 0);
 
-console.log('✓ 加速档位、联机速度锁和标准蓝牙手柄映射');
+const genericButtons = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
+genericButtons[2] = { pressed: true, value: 1 };
+genericButtons[3] = { pressed: true, value: 1 };
+genericButtons[10] = { pressed: true, value: 1 };
+genericButtons[11] = { pressed: true, value: 1 };
+const genericMapped = mapGamepadToNesButtons({
+  mapping: '',
+  buttons: genericButtons,
+  axes: [0, 0, -0.428],
+});
+assert.deepEqual(
+  [...genericMapped].sort(),
+  ['A', 'B', 'RIGHT', 'SELECT', 'START'].sort(),
+);
+
+const standardDoesNotUseFallbacks = mapGamepadToNesButtons({
+  mapping: 'standard',
+  buttons: genericButtons,
+  axes: [0, 0, -0.428],
+});
+assert.equal(standardDoesNotUseFallbacks.size, 0);
+
+console.log('✓ 加速档位、联机速度锁、标准及通用蓝牙手柄映射');
