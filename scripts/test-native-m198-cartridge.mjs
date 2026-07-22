@@ -13,7 +13,7 @@ import { isKnownTunshiPostgameRom } from '../src/emulator/tunshi-postgame-rom.js
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultPath = path.join(
   root,
-  'public/FC中文游戏/汉室新章/吞食天地2-汉室新章-v0.6-原版人物修复版.zip',
+  'public/FC中文游戏/汉室新章/吞食天地2-汉室新章-v1.2-A键序幕修复版.zip',
 );
 const inputPath = path.resolve(process.argv[2] || defaultPath);
 const input = new Uint8Array(fs.readFileSync(inputPath));
@@ -24,6 +24,22 @@ assert.ok(entry, '汉室新章卡带包中没有 NES 文件');
 const [name, rom] = entry;
 assert.equal(hasMapper198CompatibilityMarker(rom), true, '汉室新章卡带缺少 M198 硬件标记');
 assert.equal(isKnownTunshiPostgameRom(rom), false, '汉室新章卡带错误依赖了网页专用剧情运行时');
+
+// The mobile UI labels its face button as “A 确定”. The cartridge title must
+// route both A and START through the same native prologue bootstrap.
+const confirmNes = new NES({ emulateSound: false });
+confirmNes.loadROM(rom);
+installRomCompatibility(confirmNes, rom);
+let aConfirmationOpenedAt = null;
+for (let frame = 0; frame < 1_230; frame += 1) {
+  if (frame === 1_200) confirmNes.buttonDown(1, Controller.BUTTON_A);
+  if (frame === 1_204) confirmNes.buttonUp(1, Controller.BUTTON_A);
+  confirmNes.frame();
+  if (confirmNes.mmap.__mapper198PrgProtocol?.extensionBanks && aConfirmationOpenedAt === null) {
+    aConfirmationOpenedAt = frame;
+  }
+}
+assert.ok(aConfirmationOpenedAt !== null && aConfirmationOpenedAt <= 1_205, 'A 确定没有进入原生序幕');
 
 let latestFrame = new Uint32Array(256 * 240);
 const nes = new NES({
@@ -67,6 +83,7 @@ console.log(JSON.stringify({
   passed: true,
   name,
   frames: 13_800,
+  aConfirmationOpenedAt,
   openedAt,
   closedAt,
   finalPc: `0x${((nes.cpu.REG_PC + 1) & 0xffff).toString(16).padStart(4, '0')}`,
