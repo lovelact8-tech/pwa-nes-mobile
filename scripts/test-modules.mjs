@@ -17,6 +17,12 @@ import {
   TUNSHI_POSTGAME_PRE_ENDING_ENTRY,
   TUNSHI_POSTGAME_PRE_ENDING_SIGNATURE,
 } from '../src/emulator/tunshi-postgame-rom.js';
+import {
+  readTunshiPostgameFormation,
+  setTunshiPostgameFormation,
+  supportsTunshiPostgameFormation,
+  tunshiPostgameRoster,
+} from '../src/emulator/tunshi-postgame-formation.js';
 
 const HEADER_SIZE = 16;
 const BANK_8K_SIZE = 0x2000;
@@ -105,6 +111,23 @@ const unrelated66Load = unrelated66Mapper.load;
 assert.equal(installRomCompatibility(unrelated66Nes, unrelated66BankRom), false);
 assert.equal(unrelated66Mapper.load, unrelated66Load, '无私有指纹的 66-bank ROM 不应被包装');
 
+const partyNes = {
+  mmap: { __tunshiPostgameBankAlias: true },
+  cpu: { mem: new Uint8Array(0x10000) },
+};
+partyNes.cpu.mem.set([0xf4, 0x01, 0x00], 0x663f);
+const selectedParty = [0x08, 0x12, 0x04, 0x06, 0x0b];
+assert.equal(supportsTunshiPostgameFormation(partyNes), true);
+assert.equal(setTunshiPostgameFormation(partyNes, selectedParty), true);
+assert.deepEqual(Array.from(partyNes.cpu.mem.slice(0x6078, 0x607f)), [6, 5, 4, 3, 2, 255, 255]);
+assert.deepEqual(Array.from(partyNes.cpu.mem.slice(0x6615, 0x661c)), [0, 0, 128, 128, 128, 128, 128]);
+assert.deepEqual(Array.from({ length: 5 }, (_, index) => partyNes.cpu.mem[0x6627 - index]), selectedParty);
+assert.deepEqual(readTunshiPostgameFormation(partyNes).map(({ id }) => id), selectedParty);
+assert.equal(partyNes.cpu.mem[0x6633], 0xf4, '新增第五人必须获得可用兵力');
+assert.equal(tunshiPostgameRoster.some(({ id, name }) => id === 0x7b && name === '马超'), true);
+assert.throws(() => setTunshiPostgameFormation(partyNes, []), /至少/);
+assert.equal(setTunshiPostgameFormation({ mmap: {}, cpu: partyNes.cpu }, selectedParty), false, '普通 ROM 不应改写队伍');
+
 const bankLoads = [];
 const postgameMapper = {
   load: (address) => address ^ 0x55aa,
@@ -117,14 +140,23 @@ assert.equal(installRomCompatibility(postgameNes, postgameRom), true);
 assert.equal(postgameMapper.load(0x5000), 0x66);
 assert.equal(postgameMapper.load(0x5fff), 0x99);
 assert.equal(postgameMapper.load(0x6000), 0x6000 ^ 0x55aa);
+assert.deepEqual(bankLoads, [
+  { bank: 0x4e, address: 0xc000 },
+  { bank: 0x4f, address: 0xe000 },
+], '冷启动必须立即替换 jsnes 预先装入的错误固定 bank');
+bankLoads.length = 0;
 postgameMapper.load8kRomBank(0x80, 0x8000);
 postgameMapper.load8kRomBank(0x81, 0xa000);
 postgameMapper.load8kRomBank(0x82, 0xc000);
+postgameMapper.load8kRomBank(0x86, 0x8000);
+postgameMapper.load8kRomBank(0xfe, 0xe000);
 assert.deepEqual(bankLoads, [
   { bank: 0x00, address: 0x8000 },
   { bank: 0x01, address: 0xa000 },
-  { bank: 0x82, address: 0xc000 },
-], '普通游戏阶段必须恢复 $80/$81 的 7-bit 高位别名');
+  { bank: 0x02, address: 0xc000 },
+  { bank: 0x06, address: 0x8000 },
+  { bank: 0x4e, address: 0xe000 },
+], '普通游戏阶段必须恢复完整 Mapper 198 双芯片 bank 线路');
 assert.equal(setTunshiPostgameExtensionBanks(postgameNes, true), true);
 postgameMapper.load8kRomBank(0x80, 0x8000);
 postgameMapper.load8kRomBank(0x81, 0xa000);

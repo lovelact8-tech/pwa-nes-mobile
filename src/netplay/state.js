@@ -127,7 +127,7 @@ export function restoreDeterministicState(nes, state, { preserveLocalAudio = fal
   const ppuState = state.ppu;
   if (!ppuState) {
     nes.fromJSON(state);
-    installRomCompatibility(nes, nes.romData);
+    installRomCompatibility(nes, nes.romData, { mapperState: state.mmap });
     resetLocalAudioOutput(nes, localAudio);
     return;
   }
@@ -147,7 +147,7 @@ export function restoreDeterministicState(nes, state, { preserveLocalAudio = fal
     nes.fromJSON(state);
     // jsnes reset() creates a fresh mapper during fromJSON(), so ROM-specific
     // mapper wrappers must be reinstalled after every rollback/state sync.
-    installRomCompatibility(nes, nes.romData);
+    installRomCompatibility(nes, nes.romData, { mapperState: state.mmap });
     resetLocalAudioOutput(nes, localAudio);
   } finally {
     // A saved snapshot must never keep references to mutable live render data.

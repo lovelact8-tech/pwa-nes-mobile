@@ -130,6 +130,7 @@
               <button id="menuLibraryBtn" class="menuAction" data-icon="search"><span><strong>中文游戏库</strong><small>搜索游戏</small></span></button>
               <button id="saveStateBtn" class="menuAction" data-icon="save"><span><strong>保存进度</strong><small>保存到本机</small></span></button>
               <button id="loadStateBtn" class="menuAction" data-icon="download"><span><strong>读取进度</strong><small>恢复游戏</small></span></button>
+              <button id="formationBtn" class="menuAction featured hidden" data-icon="users"><span><strong>城内编队所</strong><small>加入、离队与排序</small></span></button>
               <button id="importStateBtn" class="menuAction" data-icon="upload"><span><strong>导入存档</strong><small>读取 JSON 文件</small></span></button>
               <input id="stateFileInput" class="hidden" type="file" accept=".json,application/json" />
             </div>
@@ -180,6 +181,13 @@
       <dialog id="cloudDialog" class="cloudDialog appDialog">
         <header class="dialogHeader"><div><span class="dialogKicker">PRIVATE CLOUD</span><h2>私人云存档</h2></div><button id="closeCloudBtn" class="dialogClose" data-icon="close" aria-label="关闭"></button></header>
         <p id="cloudDialogStatus" class="smallText">正在读取云存档...</p><div id="cloudSaveList" class="cloudSaveList"></div>
+      </dialog>
+
+      <dialog id="formationDialog" class="formationDialog appDialog">
+        <header class="dialogHeader"><div><span class="dialogKicker">FORMATION HOUSE</span><h2>城内编队所</h2></div><button id="closeFormationBtn" class="dialogClose" data-icon="close" aria-label="关闭"></button></header>
+        <p id="formationStatus" class="formationStatus" role="status">最多五人出战，点击武将加入或离队。</p>
+        <div id="formationRoster" class="formationRoster" aria-label="可用武将"></div>
+        <footer class="dialogFooter"><button id="cancelFormationBtn" class="footerDanger">取消</button><button id="confirmFormationBtn" class="footerPrimary">确认编队</button></footer>
       </dialog>
 
       <dialog id="settingsDialog" class="settingsDialog appDialog">
