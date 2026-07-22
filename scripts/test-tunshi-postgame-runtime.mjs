@@ -7,9 +7,13 @@ import {
 
 const HEADER_SIZE = 16;
 const BANK_8K = 0x2000;
-const ROM_SIZE = HEADER_SIZE + 0x42 * 0x4000;
+const ROM_SIZE = HEADER_SIZE + 0x80 * 0x4000;
 const PRE_ENDING_SIGNATURE = [0xa9, 0x2a, 0x20, 0xe3, 0xc6, 0x4c, 0x03, 0xba];
-const POSTGAME_SIGNATURE = [0x20, 0x85, 0xd2, 0x00, 0x56];
+const POSTGAME_SIGNATURE = [
+  0xa2, 0x00, 0xbd, 0x00, 0xa0, 0x9d, 0x00,
+  0x7f, 0xe8, 0xd0, 0xf7, 0x4c, 0x00, 0x7f,
+];
+const DRIVER_SIGNATURE = [0x20, 0x85, 0xd2, 0x00, 0x56];
 const COMPLETION_MARKER = [0x48, 0x53, 0x58, 0x5a, 0xa5, 0x5a];
 
 function bankOffset(bank, address) {
@@ -18,9 +22,10 @@ function bankOffset(bank, address) {
 
 function makePostgameRom() {
   const rom = new Uint8Array(ROM_SIZE);
-  rom.set([0x4e, 0x45, 0x53, 0x1a, 0x42, 0x00, 0x40, 0x00]);
-  rom.set(PRE_ENDING_SIGNATURE, bankOffset(0x83, tunshiPostgameAddresses.preEnding));
+  rom.set([0x4e, 0x45, 0x53, 0x1a, 0x80, 0x00, 0x40, 0x00]);
+  rom.set(PRE_ENDING_SIGNATURE, bankOffset(0xff, tunshiPostgameAddresses.preEnding));
   rom.set(POSTGAME_SIGNATURE, bankOffset(0x81, tunshiPostgameAddresses.postgame));
+  rom.set(DRIVER_SIGNATURE, bankOffset(0x81, 0xa000));
   return rom;
 }
 
@@ -236,8 +241,10 @@ const guestController = installTunshiPostgameRuntime(guestNes, rom, {
 guestController.importState(JSON.parse(JSON.stringify(creditsRuntimeState)));
 assert.equal(guestController.phase, 'credits');
 assert.equal(guestController.hasCheckpoint, true);
-setPc(guestNes.cpu, tunshiPostgameAddresses.postgame);
+guestNes.cpu.mem.set(DRIVER_SIGNATURE, tunshiPostgameAddresses.ramPostgame);
+setPc(guestNes.cpu, tunshiPostgameAddresses.ramPostgame);
 guestNes.cpu.emulate();
+assert.equal(guestController.phase, 'epilogue', '稳定布局的 $7F00 RAM 剧情驱动必须被运行时识别');
 guestNes.cpu.mem.set(COMPLETION_MARKER, tunshiPostgameAddresses.completionMarker);
 assert.equal(guestController.afterFrame(), true);
 assert.equal(guestRestores, 1);
@@ -245,4 +252,4 @@ assert.equal(guestController.completed, true);
 assert.equal((guestNes.cpu.REG_PC + 1) & 0xffff, tunshiPostgameAddresses.continue);
 guestController.dispose();
 
-console.log('✓ 吞食天地2通关运行时：精确ROM隔离、结局前检查点、帧间恢复、500次CPU换代无历史引用、继续游戏与防重复触发');
+console.log('✓ 吞食天地2通关运行时：精确ROM隔离、$BE00/$7F00双入口、结局前检查点、帧间恢复、500次CPU换代无历史引用、继续游戏与防重复触发');

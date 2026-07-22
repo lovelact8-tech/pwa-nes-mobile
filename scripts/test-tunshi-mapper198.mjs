@@ -7,6 +7,7 @@ import { NES, Controller } from 'jsnes';
 import { unzipSync } from 'fflate';
 import {
   installRomCompatibility,
+  isKnownTunshi1mRom,
   isKnownTunshi640kRom,
   isMmc3ChrRamExpansionRom,
 } from '../src/emulator/rom-compat.js';
@@ -30,6 +31,7 @@ const supportedHashes = new Set([
 assert.equal(supportedHashes.has(romHash), true, `未登记的测试 ROM：${romHash}`);
 assert.equal(isMmc3ChrRamExpansionRom(romBytes), true);
 if (romBytes.length === 655376) assert.equal(isKnownTunshi640kRom(romBytes), true);
+if (romBytes.length === 1048592) assert.equal(isKnownTunshi1mRom(romBytes), true);
 const rom = Array.from(romBytes, (byte) => String.fromCharCode(byte)).join('');
 
 function createScenario(name) {

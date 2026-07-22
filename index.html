@@ -188,6 +188,19 @@
           <div class="settingRange"><span><b>手柄透明度</b><small>降低可减少画面遮挡</small></span><output id="controlOpacityValue" for="controlOpacityInput">90%</output></div>
           <input id="controlOpacityInput" class="rangeInput" type="range" min="45" max="100" step="5" value="90" />
         </section>
+        <section class="settingsGroup">
+          <div class="groupTitle"><span>游戏速度</span><small>联机时自动固定 1×</small></div>
+          <div class="playbackSpeedPresets" role="group" aria-label="游戏运行速度">
+            <button type="button" data-playback-speed="1">1×</button><button type="button" data-playback-speed="2">2×</button><button type="button" data-playback-speed="4">4×</button><button type="button" data-playback-speed="6">6×</button><button type="button" data-playback-speed="8">8×</button>
+          </div>
+          <p id="playbackSpeedStatus" class="deviceStatus">当前为正常速度</p>
+        </section>
+        <section class="settingsGroup">
+          <div class="groupTitle"><span>蓝牙手柄</span><small>Gamepad API</small></div>
+          <button id="gamepadConnectBtn" type="button" class="deviceConnect" data-icon="bluetooth">检测并连接手柄</button>
+          <p id="gamepadStatus" class="deviceStatus" role="status">未检测到手柄</p>
+          <p class="deviceMapping">方向键/摇杆移动 · 右键=A · 下键=B · L1/R1=连发</p>
+        </section>
         <section class="settingsGroup"><div class="groupTitle"><span>按键大小</span><small>横竖屏分别保存</small></div><div class="layoutPresets" role="group" aria-label="全局按键大小"><button type="button" data-layout-scale="0.85">紧凑</button><button type="button" data-layout-scale="1">标准</button><button type="button" data-layout-scale="1.15">放大</button></div></section>
         <section class="settingsActions"><button id="layoutEditBtn" class="settingsPrimary" data-icon="sliders">调整按键位置</button><button id="resetLayoutBtn" data-icon="rotate">恢复默认布局</button></section>
         <p id="settingsModeText" class="settingsHint">横屏与竖屏布局会分别保存，不会互相影响。</p>

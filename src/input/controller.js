@@ -17,8 +17,8 @@ export function createInputController({
     return new Set([...sources.keyboard, ...sources.dpad, ...sources.action]);
   }
 
-  function syncVisuals() {
-    const activeButtons = getButtons();
+  function syncVisuals(buttons = null) {
+    const activeButtons = buttons instanceof Set ? buttons : getButtons();
     document.querySelectorAll('[data-btn]').forEach((element) => {
       const active = element.dataset.btn === 'AB'
         ? activeButtons.has('A') && activeButtons.has('B')

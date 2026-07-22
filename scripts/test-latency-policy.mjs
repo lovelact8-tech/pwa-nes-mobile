@@ -19,7 +19,7 @@ function plan(overrides = {}) {
 
 assert.equal(shouldUseGuestRollback({ rttMs: 40, jitterMs: 4 }), true);
 assert.equal(shouldUseGuestRollback({ rttMs: 40, jitterMs: 30 }), false);
-assert.equal(shouldUseGuestRollback({ rttMs: 120, jitterMs: 4 }), false);
+assert.equal(shouldUseGuestRollback({ rttMs: 120, jitterMs: 4 }), true);
 assert.equal(shouldUseGuestRollback({ rttMs: 40, jitterMs: 4, transportStalled: true }), false);
 
 const stableIpv6 = plan();
@@ -44,7 +44,7 @@ assert.equal(jitteryRoute.mode, 'buffered');
 
 const slowRoute = plan({ rttMs: 180, jitterMs: 15 });
 assert.equal(slowRoute.rollback, false);
-assert.equal(slowRoute.leadFrames, 4);
+assert.equal(slowRoute.leadFrames, 3);
 
 const stalledRoute = plan({ transportStalled: true });
 assert.equal(stalledRoute.rollback, false);

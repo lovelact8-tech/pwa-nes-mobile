@@ -9,6 +9,7 @@ import { createDialogController } from './ui/dialogs.js';
 import { createFullscreenController } from './ui/fullscreen.js';
 import { createControlLayoutController } from './input/control-layout.js';
 import { createInputController } from './input/controller.js';
+import { createGamepadInput } from './input/gamepad.js';
 import { registerServiceWorker } from './pwa/register.js';
 import {
   captureDeterministicState,
@@ -20,8 +21,15 @@ import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputLateness, getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
+import { applyTunshiBattleVisualCompatibility } from './emulator/tunshi-battle-visual-compat.js';
+import { createFrameTransitionGuard } from './emulator/frame-transition-guard.js';
+import {
+  isKnownTunshiPostgameRom,
+  isLegacyTunshiPostgameRom,
+} from './emulator/tunshi-postgame-rom.js';
 import { installTunshiPostgameRuntime } from './emulator/tunshi-postgame-runtime.js';
 import { createAudioController } from './emulator/audio.js';
+import { createPlaybackSpeedController, getPlaybackFrameLimit } from './emulator/playback-speed.js';
 import { getRuntimeRelayUrl } from './netplay/relay-url.js';
 import { createAuthoritativeStreamSession } from './netplay/authoritative-stream.js';
 import {
@@ -38,6 +46,7 @@ import {
 import {
   NETWORK_STORAGE_KEY, NET_MODE_STORAGE_KEY, CLOUD_ACCESS_KEY_STORAGE_KEY,
   CLOUD_AUTO_BACKUP_STORAGE_KEY, CLOUD_DEVICE_ID_STORAGE_KEY, SAVE_STATE_STORAGE_KEY,
+  PLAYBACK_SPEED_STORAGE_KEY,
 } from './storage/keys.js';
 import {
   assertStateRomMatches,
@@ -58,10 +67,12 @@ const {
   cloudDialogStatus, cloudSaveList, closeCloudBtn, layoutEditBtn, resetLayoutBtn, closeSettingsBtn,
   settingsModeText, layoutPresetButtons, controlOpacityInput, controlOpacityValue, dpad, actionZone,
   fullscreenBtn, netPerformanceHud, netModeSelect,
+  playbackSpeedButtons, playbackSpeedStatus, gamepadConnectBtn, gamepadStatus,
 } = ui;
 const ctx = canvas.getContext('2d');
 const imageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 const frameBuffer32 = new Uint32Array(imageData.data.buffer);
+const frameTransitionGuard = createFrameTransitionGuard();
 const dialogController = createDialogController({
   settingsDialog,
   dismissibleDialogs: [menuDialog, libraryDialog, cloudDialog],
@@ -85,6 +96,8 @@ let lastTick = 0;
 let frameRemainder = 0;
 const buttonStateByPlayer = { 1: new Set(), 2: new Set() };
 let controllerInput = null;
+let gamepadInput = null;
+let playbackSpeedController = null;
 let localPlayer = 1;
 let remotePlayer = 2;
 let networkRole = 'offline';
@@ -147,6 +160,7 @@ let stateRequestInFlight = false;
 let romRequestRetryTimer = 0;
 let romRequestAttempts = 0;
 let suppressEmulatorOutput = false;
+let suppressVideoOutput = false;
 let networkRttMs = 0;
 let networkRttJitterMs = 0;
 let networkPingId = '';
@@ -167,11 +181,21 @@ const RELAY_SERVER_URL = getRuntimeRelayUrl();
 const audio = createAudioController({
   onStatus: setStatus,
   onChange: updateSoundButton,
-  getSourceSampleRate: () => nes?.papu?.sampleRate,
+  getSourceSampleRate: () => (nes?.papu?.sampleRate || 44100) * (playbackSpeedController?.getEffective() || 1),
 });
 const initAudio = () => audio.init();
 const clearAudioBuffer = () => audio.clear();
 const pushAudioSample = (left, right) => audio.pushSample(left, right);
+playbackSpeedController = createPlaybackSpeedController({
+  buttons: playbackSpeedButtons,
+  statusElement: playbackSpeedStatus,
+  storageKey: PLAYBACK_SPEED_STORAGE_KEY,
+  isLocked: () => networkRole !== 'offline' || peerConnected,
+  onChange: () => {
+    clearAudioBuffer();
+    if (running) startLoop();
+  },
+});
 const streamSession = createAuthoritativeStreamSession({
   canvas,
   remoteVideo: remoteStreamVideo,
@@ -641,11 +665,14 @@ function refreshInviteLink() {
 }
 
 function getLocalMergedButtons() {
-  return controllerInput?.getButtons() || new Set();
+  return new Set([
+    ...(controllerInput?.getButtons() || []),
+    ...(gamepadInput?.getButtons() || []),
+  ]);
 }
 
 function syncButtonVisuals() {
-  controllerInput?.syncVisuals();
+  controllerInput?.syncVisuals(getLocalMergedButtons());
 }
 
 function setPlayerButtons(player, nextButtons, { broadcast = false } = {}) {
@@ -2482,9 +2509,11 @@ function createNES() {
   return new NES({
     sampleRate: audio.getSampleRate(),
     onFrame(frameBuffer24) {
-      if (suppressEmulatorOutput) return;
+      if (suppressEmulatorOutput || suppressVideoOutput) return;
+      const displayFrame = frameTransitionGuard.process(frameBuffer24).frame;
+      applyTunshiBattleVisualCompatibility(nes, displayFrame);
       for (let i = 0; i < FRAMEBUFFER_SIZE; i++) {
-        frameBuffer32[i] = 0xff000000 | frameBuffer24[i];
+        frameBuffer32[i] = 0xff000000 | displayFrame[i];
       }
       ctx.putImageData(imageData, 0, 0);
     },
@@ -2595,6 +2624,9 @@ function formatRomLoadError(error) {
 
 function startRom(romData, name = 'NES 游戏') {
   try {
+    if (isLegacyTunshiPostgameRom(romData)) {
+      throw new Error('检测到汉室新章 v0.1：该旧版使用非幂次 PRG 布局，会造成战斗花屏。请改用 v0.2 一键体验版。');
+    }
     lastGameId = '';
     currentCloudFavorite = false;
     updateCloudFavoriteButton();
@@ -2603,6 +2635,8 @@ function startRom(romData, name = 'NES 游戏') {
     clearAudioBuffer();
     tunshiPostgameRuntime?.dispose();
     tunshiPostgameRuntime = null;
+    frameTransitionGuard.setEnabled(isKnownTunshiPostgameRom(romData));
+    frameTransitionGuard.reset();
     nes = createNES();
     nes.loadROM(romData);
     installRomCompatibility(nes, romData);
@@ -2617,7 +2651,13 @@ function startRom(romData, name = 'NES 游戏') {
         }
       },
     });
+    // Paint one emulator frame immediately. requestAnimationFrame can be
+    // suspended while a mobile file picker is closing or while an installed
+    // PWA is returning to the foreground; without this first frame the canvas
+    // keeps its CSS placeholder and looks like a permanent gray screen.
     gameFrame = 0;
+    runEmulatorFrame();
+    gameFrame = 1;
     resetRollbackState({ capture: true });
     lastQueuedLocalButtons = new Set();
     hostClockFrame = null;
@@ -2736,7 +2776,8 @@ function loop(timestamp) {
 
   if (!lastTick) lastTick = timestamp;
   const delta = Math.min(timestamp - lastTick, MAX_FRAME_DELTA_MS);
-  let elapsed = delta + frameRemainder;
+  const playbackSpeed = playbackSpeedController?.getEffective() || 1;
+  let elapsed = delta * playbackSpeed + frameRemainder;
   let frames = 0;
 
   let guestFrameDifference = 0;
@@ -2784,16 +2825,28 @@ function loop(timestamp) {
     }
   }
 
-  while (elapsed >= FRAME_MS && frames < 3) {
-    if (!isAuthoritativeStreamMode()) {
-      captureRollbackSnapshot();
-      applyScheduledNetworkInputs();
+  // At 8× a normal 60 Hz render tick must execute eight emulator frames.
+  // The three-tick allowance also absorbs a single slow display frame without
+  // letting an unbounded backlog freeze the interface.
+  const maxFramesThisTick = getPlaybackFrameLimit(playbackSpeed);
+  const framesDue = Math.min(maxFramesThisTick, Math.floor(elapsed / FRAME_MS));
+  try {
+    while (elapsed >= FRAME_MS && frames < framesDue) {
+      // Fast-forward still generates every audio sample, but only paints the
+      // final frame of this display tick. This keeps 8× usable on phones.
+      suppressVideoOutput = playbackSpeed > 1 && frames + 1 < framesDue;
+      if (!isAuthoritativeStreamMode()) {
+        captureRollbackSnapshot();
+        applyScheduledNetworkInputs();
+      }
+      runEmulatorFrame();
+      gameFrame++;
+      performanceHudFrames++;
+      elapsed -= FRAME_MS;
+      frames++;
     }
-    runEmulatorFrame();
-    gameFrame++;
-    performanceHudFrames++;
-    elapsed -= FRAME_MS;
-    frames++;
+  } finally {
+    suppressVideoOutput = false;
   }
 
   frameRemainder = elapsed;
@@ -2880,8 +2933,11 @@ soundBtn.addEventListener('click', () => {
 settingsBtn.addEventListener('click', () => {
   releaseAllButtons({ broadcast: true });
   dialogController.openSettings();
+  playbackSpeedController?.refresh();
+  gamepadInput?.refreshStatus();
 });
 closeSettingsBtn.addEventListener('click', dialogController.closeSettings);
+gamepadConnectBtn?.addEventListener('click', () => gamepadInput?.requestConnection());
 layoutEditBtn.addEventListener('click', () => {
   const nextMode = !controlLayout.isEditing();
   setLayoutEditMode(nextMode);
@@ -3057,6 +3113,7 @@ function releaseAllButtons({ broadcast = false } = {}) {
   }
   suppressNetworkBroadcast = true;
   controllerInput?.clear({ notifyChange: false });
+  gamepadInput?.clear();
   setPlayerButtons(1, new Set(), { broadcast: false });
   setPlayerButtons(2, new Set(), { broadcast: false });
   suppressNetworkBroadcast = false;
@@ -3069,6 +3126,12 @@ controllerInput = createInputController({
   layout: controlLayout,
   onChange: syncLocalPlayerState,
 });
+gamepadInput = createGamepadInput({
+  onChange: syncLocalPlayerState,
+  onStatus: (text) => { if (gamepadStatus) gamepadStatus.textContent = text; },
+  isInputEnabled: () => !document.querySelector('dialog[open]') && !controlLayout.isEditing(),
+});
+gamepadInput.start();
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {

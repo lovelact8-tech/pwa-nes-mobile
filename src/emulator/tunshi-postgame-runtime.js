@@ -2,10 +2,11 @@ import {
   captureDeterministicState,
   restoreDeterministicState,
 } from '../netplay/state.js';
+import { setTunshiPostgameExtensionBanks } from './rom-compat.js';
 import {
   isKnownTunshiPostgameRom,
+  getTunshiPostgameRomLayout,
   TUNSHI_POSTGAME_ENTRY,
-  TUNSHI_POSTGAME_ENTRY_SIGNATURE,
   TUNSHI_POSTGAME_PRE_ENDING_ENTRY,
   TUNSHI_POSTGAME_PRE_ENDING_SIGNATURE,
 } from './tunshi-postgame-rom.js';
@@ -14,12 +15,13 @@ export { isKnownTunshiPostgameRom } from './tunshi-postgame-rom.js';
 
 const PRE_ENDING_ENTRY = TUNSHI_POSTGAME_PRE_ENDING_ENTRY;
 const POSTGAME_ENTRY = TUNSHI_POSTGAME_ENTRY;
+const RAM_POSTGAME_ENTRY = 0x7f00;
+const POSTGAME_FIXED_SWITCH_ENTRY = 0xf38e;
 const CONTINUE_ENTRY = 0xf43f;
 const COMPLETION_MARKER_ADDRESS = 0x07f8;
 const COMPLETION_MARKER = [0x48, 0x53, 0x58, 0x5a, 0xa5, 0x5a]; // HSXZ + guard
 
 const PRE_ENDING_SIGNATURE = TUNSHI_POSTGAME_PRE_ENDING_SIGNATURE;
-const POSTGAME_SIGNATURE = TUNSHI_POSTGAME_ENTRY_SIGNATURE;
 const RUNTIME_SLOT = Symbol('tunshiPostgameRuntime');
 
 function currentProgramCounter(nes) {
@@ -63,6 +65,8 @@ export function installTunshiPostgameRuntime(nes, romData, {
 } = {}) {
   if (!nes?.cpu || !isKnownTunshiPostgameRom(romData)) return null;
   if (nes[RUNTIME_SLOT]) return nes[RUNTIME_SLOT];
+  const romLayout = getTunshiPostgameRomLayout(romData);
+  if (!romLayout) return null;
 
   let phase = 'armed';
   let checkpoint = null;
@@ -102,6 +106,7 @@ export function installTunshiPostgameRuntime(nes, romData, {
     checkpoint = null;
     completed = false;
     clearStaleCompletionMarker();
+    setTunshiPostgameExtensionBanks(nes, false);
     setPhase('armed', reason);
     attachCpu(nes.cpu);
     emit('rearmed', { reason });
@@ -112,8 +117,13 @@ export function installTunshiPostgameRuntime(nes, romData, {
     return mappedBytesMatch(nes, PRE_ENDING_ENTRY, PRE_ENDING_SIGNATURE);
   }
 
-  function hasPostgameSignature() {
-    return mappedBytesMatch(nes, POSTGAME_ENTRY, POSTGAME_SIGNATURE);
+  function isPostgameInstruction(pc) {
+    if (pc === romLayout.romEntry) {
+      return mappedBytesMatch(nes, romLayout.romEntry, romLayout.romEntrySignature);
+    }
+    return romLayout.bootStrategy === 'ram-copy'
+      && pc === romLayout.ramEntry
+      && mappedBytesMatch(nes, romLayout.ramEntry, romLayout.driverSignature);
   }
 
   function detachCpuHook() {
@@ -147,6 +157,7 @@ export function installTunshiPostgameRuntime(nes, romData, {
     try {
       restoreState(nes, savedCheckpoint);
       attachCpu(nes.cpu);
+      setTunshiPostgameExtensionBanks(nes, false);
       // The restored snapshot was captured immediately before the stock
       // credits entry. Clear the scripted-scene/menu locks just like ordinary
       // event tails do before returning to the overworld loop.
@@ -172,6 +183,10 @@ export function installTunshiPostgameRuntime(nes, romData, {
     if (disposed || !nes.cpu) return;
     const pc = currentProgramCounter(nes);
 
+    if (pc === POSTGAME_FIXED_SWITCH_ENTRY) {
+      setTunshiPostgameExtensionBanks(nes, true);
+    }
+
     if (pc === PRE_ENDING_ENTRY && hasPreEndingSignature()) {
       if (completed) {
         retriggerCount += 1;
@@ -187,9 +202,8 @@ export function installTunshiPostgameRuntime(nes, romData, {
       }
     }
 
-    if ((phase === 'credits' || phase === 'epilogue')
-      && pc === POSTGAME_ENTRY
-      && hasPostgameSignature()) {
+    if ((phase === 'credits' || phase === 'epilogue') && isPostgameInstruction(pc)) {
+      setTunshiPostgameExtensionBanks(nes, true);
       if (phase !== 'epilogue') setPhase('epilogue', 'postgame-entry');
       return;
     }
@@ -222,6 +236,7 @@ export function installTunshiPostgameRuntime(nes, romData, {
     },
     refresh() {
       attachCpu(nes.cpu);
+      setTunshiPostgameExtensionBanks(nes, phase === 'epilogue');
     },
     rearm() {
       return rearm('manual-rearm');
@@ -254,10 +269,12 @@ export function installTunshiPostgameRuntime(nes, romData, {
       else if (checkpoint && ['credits', 'epilogue'].includes(state.phase)) phase = state.phase;
       else phase = 'armed';
       attachCpu(nes.cpu);
+      setTunshiPostgameExtensionBanks(nes, phase === 'epilogue');
     },
     dispose() {
       if (disposed) return;
       disposed = true;
+      setTunshiPostgameExtensionBanks(nes, false);
       detachCpuHook();
       if (wrappedFromJSON && nes.fromJSON === wrappedFromJSON) nes.fromJSON = originalFromJSON;
       checkpoint = null;
@@ -274,6 +291,7 @@ export function installTunshiPostgameRuntime(nes, romData, {
 export const tunshiPostgameAddresses = Object.freeze({
   preEnding: PRE_ENDING_ENTRY,
   postgame: POSTGAME_ENTRY,
+  ramPostgame: RAM_POSTGAME_ENTRY,
   continue: CONTINUE_ENTRY,
   completionMarker: COMPLETION_MARKER_ADDRESS,
 });

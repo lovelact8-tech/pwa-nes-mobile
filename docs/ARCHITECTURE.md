@@ -25,10 +25,13 @@ main.js
 | 应用启动、ROM切换、帧循环 | `src/main.js` | 创建 NES、组织各控制器、回滚联机总编排 |
 | 声音卡顿、采样率、声音开关 | `src/emulator/audio.js` | AudioContext、缓冲区、44.1/48kHz重采样、串流音轨 |
 | 特殊ROM黑屏或Mapper兼容 | `src/emulator/rom-compat.js` | 按ROM特征安装兼容层 |
-| 私有续篇ROM身份识别 | `src/emulator/tunshi-postgame-rom.js` | 66-bank头信息与双代码指纹，供兼容层和运行时共用 |
-| 《吞食天地2》片尾后继续游戏 | `src/emulator/tunshi-postgame-runtime.js` | 结局入口检查点、扩展剧情完成标记、帧间恢复和防重复触发 |
+| 私有续篇ROM身份识别 | `src/emulator/tunshi-postgame-rom.js` | 稳定128-bank布局（兼容旧66-bank原型）与多重代码指纹，供兼容层和运行时共用 |
+| 《吞食天地2》续篇直达 | `src/emulator/tunshi-postgame-boot.js` | 校验完整结局检查点、恢复全机状态、跳过旧片尾并从安全RAM页启动新章 |
+| 《吞食天地2》片尾后继续游戏 | `src/emulator/tunshi-postgame-runtime.js` | 结局边界、扩展剧情完成标记、帧间恢复和防重复触发 |
 | 分辨率、FPS帧常量 | `src/emulator/constants.js` | 模拟器屏幕和帧时序常量 |
+| 1×/2×/4×/6×/8×加速 | `src/emulator/playback-speed.js` | 档位校验、记忆设置、联机1×锁定和速度界面状态 |
 | A/B/AB、方向盘、键盘、连续按键 | `src/input/controller.js` | 汇总触摸和键盘输入并提供本地视觉反馈 |
+| 蓝牙/USB实体手柄 | `src/input/gamepad.js` | Gamepad API设备发现、标准按键映射和轮询输入 |
 | 手柄位置、大小、透明度、横竖屏布局 | `src/input/control-layout.js` | 独立保存和编辑两套布局 |
 | 回滚状态保存、恢复、哈希差异 | `src/netplay/state.js` | 确定性状态和跨设备一致性 |
 | 输入消息格式 | `src/netplay/input.js` | 输入位图编码与解码 |
@@ -54,3 +57,12 @@ main.js
 4. 输入延迟策略修改后必须运行 `npm run latency:test` 和 `npm run netplay:test`。
 5. ROM兼容修改必须运行 `npm run modules:test` 和 `npm run rom-compat:test`。
 6. 发布前运行 `npm run build`，并递增 `public/sw.js` 缓存版本。
+7. 实体手柄或加速功能修改后运行 `npm run controls:test`；联机始终保持1×，不得把加速档位带入回滚时间线。
+
+## 《吞食天地2：汉室新章》兼容边界
+
+私人续篇 v0.2 使用 128 × 16KB PRG 的幂次布局。该游戏会写入完整的 8 位 MMC3 bank 值；`$82-$FD` 必须镜像其原始 7 位别名，`$FE/$FF` 必须落到真正的两个固定 bank。不得恢复为 66 × 16KB 的非幂次布局，否则 jsnes 取模后会把 `$FE/$FF` 映射成错误 bank，战斗小人和相关图形会花屏。
+
+续篇不能仅恢复一部分 RAM 后修改 PC。`tunshi-postgame-boot.js` 先恢复确定性的完整检查点，校验 `$F386` 指令边界与固定 bank 指纹，再将短剧情驱动复制到已验证为空的 `$7F00-$7FFF`。原版会把 `$5000-$5FFF` 当扩展 RAM 写入并执行，续篇代码不得占用该区间。
+
+特殊逻辑只在严格匹配已登记 ROM 后启用：640KB 与 1MB 底版使用完整文件 FNV-1a 门控并由发布 SHA-256 复核；稳定续篇使用长度、Mapper、固定入口、bootstrap 和驱动多重指纹。普通 Mapper 4 ROM、无关的 128-bank ROM、指纹损坏文件和旧 66-bank 原型均保持原行为；旧原型只提示升级，不能进入续篇运行时。

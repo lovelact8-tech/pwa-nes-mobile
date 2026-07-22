@@ -23,4 +23,6 @@ export const ui = Object.freeze({
   layoutPresetButtons: document.querySelectorAll('[data-layout-scale]'), controlOpacityInput: byId('controlOpacityInput'),
   controlOpacityValue: byId('controlOpacityValue'), dpad: byId('dpad'), actionZone: document.querySelector('.rightZone'),
   fullscreenBtn: byId('fullscreenBtn'), netPerformanceHud: byId('netPerformanceHud'), netModeSelect: byId('netModeSelect'),
+  playbackSpeedButtons: document.querySelectorAll('[data-playback-speed]'), playbackSpeedStatus: byId('playbackSpeedStatus'),
+  gamepadConnectBtn: byId('gamepadConnectBtn'), gamepadStatus: byId('gamepadStatus'),
 });
