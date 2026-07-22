@@ -238,6 +238,13 @@ export function setTunshiPostgameExtensionBanks(nes, enabled) {
   const next = Boolean(enabled);
   if (mapper.__tunshiPostgameExtensionBanks === next) return true;
   mapper.__tunshiPostgameExtensionBanks = next;
+  // $FE is MMC3's hard-wired 8 KiB bank. Switching between the stock
+  // Mapper-198 aliases and the private extension pair changes its physical
+  // meaning too, so both fixed banks must be remapped atomically. Leaving
+  // $C000 on normalized bank $4E makes the epilogue jump into table data and
+  // produces the familiar gray screen while audio continues to run.
+  const fixedBankAddress = mapper.prgAddressSelect ? 0x8000 : 0xc000;
+  mapper.load8kRomBank(0xfe, fixedBankAddress);
   mapper.load8kRomBank(0xff, 0xe000);
   return true;
 }
