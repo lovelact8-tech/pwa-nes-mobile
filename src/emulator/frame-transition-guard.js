@@ -151,7 +151,12 @@ export function createFrameTransitionGuard(options = {}) {
 
     const nearBlack = isNearBlackFrame(frame, settings);
     const nearBlackByLuma = isNearBlackFrameByLuma(frame, settings);
-    const isTransitionSeed = nearBlack || nearBlackByLuma;
+    // Sparse, high-contrast screens such as the stock password/record-code
+    // menu have a very low average luma even though their white glyphs are
+    // perfectly valid output. Only a genuinely near-black pixel ratio may
+    // start a transition; otherwise those menus can be mistaken for a fade
+    // and remain hidden forever while the game and music continue running.
+    const isTransitionSeed = nearBlack;
 
     if (phase === 'normal') {
       if (!isTransitionSeed) {
@@ -199,7 +204,7 @@ export function createFrameTransitionGuard(options = {}) {
 
     // The first stable frame can sometimes be a true black/visible alternating
     // flash residue. Hold output for a few extra frames to avoid exposing it.
-    if (nearBlackByLuma) {
+    if (nearBlackByLuma && consecutiveStable < settings.stableReleaseFrames) {
       flashHold = Math.max(settings.flashLockFrames, flashHold);
       return result(output, true, false);
     }

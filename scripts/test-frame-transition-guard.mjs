@@ -34,6 +34,17 @@ assert.equal(ordinaryResult.frame, ordinary);
 assert.equal(ordinaryResult.guarded, false);
 assert.deepEqual(ordinaryResult.frame, ordinary);
 
+// The Tunshi password/record-code screen is mostly black with sparse white
+// glyphs. Its average luma is low, but it is a real interactive screen and
+// must never be classified as a permanent fade.
+const sparseText = solid(0x000000);
+sparseText[7] = 0xffffff;
+assert.equal(isNearBlackFrame(sparseText, { sampleStride: 1 }), false);
+const passwordMenu = createFrameTransitionGuard({ enabled: true, sampleStride: 1 });
+const passwordResult = passwordMenu.process(sparseText);
+assert.equal(passwordResult.guarded, false);
+assert.equal(passwordResult.frame, sparseText);
+
 // The stock battle transition alternates black and partially prepared PPU
 // frames. None of those black frames may reach the canvas.
 const alternating = createFrameTransitionGuard({
@@ -108,5 +119,25 @@ assert.equal(recovered.guarded, false);
 assert.equal(recovered.phase, 'normal');
 assert.equal(recovered.frame, newScene);
 assert.deepEqual(newScene, newSceneBefore);
+
+// The same sparse text must also become visible after a real black transition
+// instead of being held forever by the average-luma safety check.
+const passwordAfterFade = createFrameTransitionGuard({
+  enabled: true,
+  sampleStride: 1,
+  stableReleaseFrames: 3,
+  settleFramesAfterDark: 2,
+  fadeInFrames: 2,
+});
+passwordAfterFade.process(ordinary);
+passwordAfterFade.process(black);
+let passwordRecovered = null;
+for (let index = 0; index < 16; index += 1) {
+  passwordRecovered = passwordAfterFade.process(sparseText);
+  if (!passwordRecovered.guarded && passwordRecovered.phase === 'normal') break;
+}
+assert.equal(passwordRecovered.guarded, false);
+assert.equal(passwordRecovered.phase, 'normal');
+assert.equal(passwordRecovered.frame, sparseText);
 
 console.log('Frame transition guard tests passed');
