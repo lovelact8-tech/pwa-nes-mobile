@@ -21,7 +21,7 @@ import { inputPayload, messageButtons } from './netplay/input.js';
 import { getGuestInputLateness, getGuestInputPlan } from './netplay/latency-policy.js';
 import { SCREEN_WIDTH, SCREEN_HEIGHT, FRAMEBUFFER_SIZE, FRAME_MS, MAX_FRAME_DELTA_MS } from './emulator/constants.js';
 import { installRomCompatibility } from './emulator/rom-compat.js';
-import { applyTunshiBattleVisualCompatibility } from './emulator/tunshi-battle-visual-compat.js';
+import { createTunshiFormationController } from './ui/tunshi-formation.js';
 import { createFrameTransitionGuard } from './emulator/frame-transition-guard.js';
 import {
   isKnownTunshiPostgameRom,
@@ -62,6 +62,7 @@ const {
   closeLibraryBtn, statusText, inviteStatusText, joinRoomForm, joinRoomInput, pauseBtn, soundBtn,
   settingsBtn, menuBtn, menuDialog, settingsDialog, closeMenuBtn, resumeBtn, resetBtn, saveStateBtn,
   loadStateBtn, importStateBtn, stateFileInput, netHostBtn, relayHostBtn, relayAccessRow, relayAccessKey, netCopyBtn, netLeaveBtn,
+  formationBtn, formationDialog, closeFormationBtn, cancelFormationBtn, confirmFormationBtn, formationRoster, formationStatus,
   netLinkInput, netStatusText, netLogBtn, netLogOutput, cloudAccessKey, cloudRememberKey,
   cloudAutoBackup, cloudSaveBtn, cloudManageBtn, cloudFavoriteBtn, cloudStatusText, cloudDialog,
   cloudDialogStatus, cloudSaveList, closeCloudBtn, layoutEditBtn, resetLayoutBtn, closeSettingsBtn,
@@ -75,7 +76,7 @@ const frameBuffer32 = new Uint32Array(imageData.data.buffer);
 const frameTransitionGuard = createFrameTransitionGuard();
 const dialogController = createDialogController({
   settingsDialog,
-  dismissibleDialogs: [menuDialog, libraryDialog, cloudDialog],
+  dismissibleDialogs: [menuDialog, libraryDialog, cloudDialog, formationDialog],
 });
 
 const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
@@ -224,6 +225,28 @@ const streamSession = createAuthoritativeStreamSession({
 function setStatus(text) {
   statusText.textContent = text;
 }
+
+const formationController = createTunshiFormationController({
+  button: formationBtn,
+  dialog: formationDialog,
+  closeButton: closeFormationBtn,
+  cancelButton: cancelFormationBtn,
+  confirmButton: confirmFormationBtn,
+  rosterElement: formationRoster,
+  statusElement: formationStatus,
+  getNes: () => nes,
+  canEdit: () => networkRole !== 'guest',
+  onBeforeOpen: () => {
+    releaseAllButtons({ broadcast: true });
+    if (menuDialog.open) menuDialog.close();
+  },
+  onApplied: (selectedIds) => {
+    releaseAllButtons({ broadcast: true });
+    resetRollbackState({ capture: networkRole !== 'offline' && peerConnected });
+    setStatus(`编队已更新：${selectedIds.length} 名武将出战`);
+    if (networkRole === 'host' && peerConnected) sendPeerSnapshot();
+  },
+});
 
 const controlLayout = createControlLayoutController({
   dpad,
@@ -2511,7 +2534,6 @@ function createNES() {
     onFrame(frameBuffer24) {
       if (suppressEmulatorOutput || suppressVideoOutput) return;
       const displayFrame = frameTransitionGuard.process(frameBuffer24).frame;
-      applyTunshiBattleVisualCompatibility(nes, displayFrame);
       for (let i = 0; i < FRAMEBUFFER_SIZE; i++) {
         frameBuffer32[i] = 0xff000000 | displayFrame[i];
       }
@@ -2624,6 +2646,7 @@ function formatRomLoadError(error) {
 
 function startRom(romData, name = 'NES 游戏') {
   try {
+    formationController.setEnabled(false);
     if (isLegacyTunshiPostgameRom(romData)) {
       throw new Error('检测到汉室新章 v0.1：该旧版使用非幂次 PRG 布局，会造成战斗花屏。请改用 v0.2 一键体验版。');
     }
@@ -2640,6 +2663,7 @@ function startRom(romData, name = 'NES 游戏') {
     nes = createNES();
     nes.loadROM(romData);
     installRomCompatibility(nes, romData);
+    formationController.setEnabled(Boolean(nes.mmap?.__tunshiPostgameBankAlias));
     tunshiPostgameRuntime = installTunshiPostgameRuntime(nes, romData, {
       onEvent(event) {
         if (event.type === 'checkpoint-captured') {

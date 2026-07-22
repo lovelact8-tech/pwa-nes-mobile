@@ -27,6 +27,7 @@ const romHash = crypto.createHash('sha256').update(romBytes).digest('hex');
 const supportedHashes = new Set([
   'fd08b9144f8624a888a50a7c1d51a592f090d5d34cb4e0ef9f9de99d14186f5a',
   '3e498dadded6b89cb3c2ecb84a25bd1fc5df23e2cecf52dcefe844ad8623d69d',
+  'f0b1aaf2c1e5e8a2cb766e70dcc6c5eebe32ebf0b2e55c55b89f73e7a5f4ec98',
 ]);
 assert.equal(supportedHashes.has(romHash), true, `未登记的测试 ROM：${romHash}`);
 assert.equal(isMmc3ChrRamExpansionRom(romBytes), true);
@@ -81,11 +82,16 @@ function verifyExpansionRamRollback(scenario) {
   const state = captureDeterministicState(scenario.nes);
   assert.ok(state.cpu?.mem, '回滚状态缺少 CPU mem');
   assert.ok(state.cpu.mem.length >= 0x6000, '回滚状态未覆盖 $5000-$5FFF');
+  assert.equal(state.mmap?.__tunshiMapper198ChrRam?.bytes?.length, 0x2000, '回滚状态缺少 Mapper 198 的 8 KiB CHR-RAM');
+  assert.equal(state.mmap?.__tunshiMapper198ChrRam?.slots?.length, 8, '回滚状态缺少 CHR-RAM bank 映射');
   const savedValue = state.cpu.mem[0x5ffe];
+  const savedChrValue = state.mmap.__tunshiMapper198ChrRam.bytes[0x123];
   scenario.nes.cpu.mem[0x5ffe] = savedValue ^ 0xff;
+  scenario.nes.mmap.__tunshiMapper198ChrRam.chrRam[0x123] = savedChrValue ^ 0xff;
   restoreDeterministicState(scenario.nes, state);
   assert.equal(scenario.nes.cpu.mem[0x5ffe], savedValue, '扩展 RAM 未从回滚状态恢复');
   assert.equal(scenario.nes.mmap.load(0x5ffe), savedValue, '恢复后兼容读取层失效');
+  assert.equal(scenario.nes.mmap.__tunshiMapper198ChrRam.chrRam[0x123], savedChrValue, 'CHR-RAM 未从回滚状态恢复');
 }
 
 const singlePlayer = createScenario('单手柄');
