@@ -13,17 +13,17 @@ import { isKnownTunshiPostgameRom } from '../src/emulator/tunshi-postgame-rom.js
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultPath = path.join(
   root,
-  'public/FC中文游戏/汉室新章/吞食天地2-汉室新章-v0.5-独立卡带版.zip',
+  'public/FC中文游戏/汉室新章/吞食天地2-汉室新章-v0.6-原版人物修复版.zip',
 );
 const inputPath = path.resolve(process.argv[2] || defaultPath);
 const input = new Uint8Array(fs.readFileSync(inputPath));
 const entry = inputPath.toLowerCase().endsWith('.nes')
   ? [path.basename(inputPath), input]
   : Object.entries(unzipSync(input)).find(([name]) => name.toLowerCase().endsWith('.nes'));
-assert.ok(entry, '独立卡带包中没有 NES 文件');
+assert.ok(entry, '汉室新章卡带包中没有 NES 文件');
 const [name, rom] = entry;
-assert.equal(hasMapper198CompatibilityMarker(rom), true, '独立卡带缺少 M198 硬件标记');
-assert.equal(isKnownTunshiPostgameRom(rom), false, '独立卡带错误依赖了网页专用剧情运行时');
+assert.equal(hasMapper198CompatibilityMarker(rom), true, '汉室新章卡带缺少 M198 硬件标记');
+assert.equal(isKnownTunshiPostgameRom(rom), false, '汉室新章卡带错误依赖了网页专用剧情运行时');
 
 let latestFrame = new Uint32Array(256 * 240);
 const nes = new NES({
@@ -48,8 +48,8 @@ for (let frame = 0; frame < 13_800; frame += 1) {
   if (frame >= 12_000 && frame % 180 === 55) nes.buttonUp(1, Controller.BUTTON_RIGHT);
   if (frame >= 12_000 && frame % 180 === 80) nes.buttonDown(1, Controller.BUTTON_A);
   if (frame >= 12_000 && frame % 180 === 84) nes.buttonUp(1, Controller.BUTTON_A);
-  assert.doesNotThrow(() => nes.frame(), `独立卡带第 ${frame} 帧崩溃`);
-  assert.equal(nes.cpu.crash, false, `独立卡带第 ${frame} 帧 CPU 崩溃`);
+  assert.doesNotThrow(() => nes.frame(), `汉室新章卡带第 ${frame} 帧崩溃`);
+  assert.equal(nes.cpu.crash, false, `汉室新章卡带第 ${frame} 帧 CPU 崩溃`);
   const extension = Boolean(nes.mmap.__mapper198PrgProtocol?.extensionBanks);
   if (extension && openedAt === null) openedAt = frame;
   if (!extension && openedAt !== null && closedAt === null) closedAt = frame;
@@ -57,7 +57,12 @@ for (let frame = 0; frame < 13_800; frame += 1) {
 
 assert.ok(openedAt !== null && openedAt <= 1_205, 'START 后没有由 ROM 打开原生扩展 bank');
 assert.ok(closedAt !== null && closedAt > openedAt, '序章结束后 ROM 没有恢复普通 Mapper 198 模式');
-assert.ok(new Set(latestFrame).size >= 3, '独立卡带最终画面异常');
+assert.deepEqual(
+  Array.from(nes.cpu.mem.slice(0x6078, 0x607f)),
+  [6, 5, 4, 255, 255, 255, 255],
+  '结局续章没有恢复孔明、姜维、赵云三人出战队伍',
+);
+assert.ok(new Set(latestFrame).size >= 3, '汉室新章卡带最终画面异常');
 console.log(JSON.stringify({
   passed: true,
   name,

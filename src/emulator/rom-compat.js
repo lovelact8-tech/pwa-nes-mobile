@@ -103,6 +103,14 @@ function installMapper198ChrRam(nes, mapper, mapperState) {
   const chrRam = new Uint8Array(CHR_RAM_BYTES);
   const slots = Array.from({ length: CHR_BANK_COUNT }, (_, index) => index);
   const registers = [0, 2, 4, 5, 6, 7];
+  // Each physical CHR-RAM bank owns its decoded Tile objects. A physical bank
+  // can be visible in more than one PPU slot at once; slot-local Tile objects
+  // make those aliases diverge and turn the game's 16x16 battle miniatures
+  // into unrelated fragments after the next MMC3 bank change.
+  const Tile = ppu.ptTile[0]?.constructor;
+  const chrRamTiles = Array.from({ length: CHR_BANK_COUNT }, () => (
+    Array.from({ length: CHR_BANK_BYTES / 16 }, () => new Tile())
+  ));
 
   if (serialized?.bytes?.length === CHR_RAM_BYTES) chrRam.set(serialized.bytes);
   else copyBytes(ppu.vramMem, 0, chrRam, 0, CHR_RAM_BYTES);
@@ -113,24 +121,49 @@ function installMapper198ChrRam(nes, mapper, mapperState) {
     for (let index = 0; index < 6; index += 1) registers[index] = serialized.registers[index] & 0xff;
   }
 
-  const flushSlot = (slot) => {
-    copyBytes(ppu.vramMem, slot * CHR_BANK_BYTES, chrRam, slots[slot] * CHR_BANK_BYTES, CHR_BANK_BYTES);
-  };
-  const rebuildSlotTiles = (slot) => {
-    const base = slot * CHR_BANK_BYTES;
+  const rebuildPhysicalTiles = (bank) => {
+    const base = bank * CHR_BANK_BYTES;
     for (let offset = 0; offset < CHR_BANK_BYTES; offset += 1) {
-      ppu.patternWrite(base + offset, ppu.vramMem[base + offset]);
+      const tile = chrRamTiles[bank][offset >> 4];
+      const byte = offset & 0x0f;
+      if (byte < 8) tile.setScanline(
+        byte,
+        chrRam[base + offset],
+        chrRam[base + offset + 8],
+      );
+      else tile.setScanline(
+        byte - 8,
+        chrRam[base + offset - 8],
+        chrRam[base + offset],
+      );
     }
   };
+  const installPhysicalTiles = (slot, bank) => {
+    const tileBase = slot * (CHR_BANK_BYTES / 16);
+    for (let tile = 0; tile < CHR_BANK_BYTES / 16; tile += 1) {
+      ppu.ptTile[tileBase + tile] = chrRamTiles[bank][tile];
+    }
+  };
+  for (let bank = 0; bank < CHR_BANK_COUNT; bank += 1) rebuildPhysicalTiles(bank);
+  for (let slot = 0; slot < CHR_BANK_COUNT; slot += 1) {
+    copyBytes(
+      chrRam,
+      slots[slot] * CHR_BANK_BYTES,
+      ppu.vramMem,
+      slot * CHR_BANK_BYTES,
+      CHR_BANK_BYTES,
+    );
+    installPhysicalTiles(slot, slots[slot]);
+  }
+
   const mapBank = (bank, address) => {
     const slot = (address & 0x1fff) >> 10;
     const physicalBank = bank & 7;
     if (slots[slot] === physicalBank) return;
     ppu.triggerRendering();
-    flushSlot(slot);
     slots[slot] = physicalBank;
     copyBytes(chrRam, physicalBank * CHR_BANK_BYTES, ppu.vramMem, slot * CHR_BANK_BYTES, CHR_BANK_BYTES);
-    rebuildSlotTiles(slot);
+    installPhysicalTiles(slot, physicalBank);
   };
   const applyRegister = (command, value) => {
     const inverted = mapper.chrAddressSelect !== 0;
@@ -183,9 +216,28 @@ function installMapper198ChrRam(nes, mapper, mapperState) {
         && mapper.chrAddressSelect !== previousChrAddressSelect) reapplyRegisters();
   };
 
+  // Keep physical CHR-RAM and every visible alias coherent on each $2007
+  // write. jsnes stores the currently visible bytes in ppu.vramMem, while a
+  // real MMC3 board writes the selected physical RAM bank. Without this hook,
+  // remapping one alias can later overwrite another alias with stale bytes.
+  const originalWriteMem = ppu.writeMem.bind(ppu);
+  ppu.writeMem = (address, value) => {
+    originalWriteMem(address, value);
+    const normalized = address & 0x3fff;
+    if (normalized >= 0x2000) return;
+    const slot = normalized >> 10;
+    const bank = slots[slot];
+    const bankOffset = normalized & (CHR_BANK_BYTES - 1);
+    chrRam[bank * CHR_BANK_BYTES + bankOffset] = value & 0xff;
+    for (let alias = 0; alias < CHR_BANK_COUNT; alias += 1) {
+      if (alias !== slot && slots[alias] === bank) {
+        ppu.vramMem[alias * CHR_BANK_BYTES + bankOffset] = value & 0xff;
+      }
+    }
+  };
+
   const originalToJSON = mapper.toJSON.bind(mapper);
   mapper.toJSON = () => {
-    for (let slot = 0; slot < CHR_BANK_COUNT; slot += 1) flushSlot(slot);
     const state = originalToJSON();
     state.__tunshiMapper198ChrRam = {
       bytes: Array.from(chrRam),
@@ -195,7 +247,7 @@ function installMapper198ChrRam(nes, mapper, mapperState) {
     return state;
   };
 
-  mapper.__tunshiMapper198ChrRam = { chrRam, slots, registers };
+  mapper.__tunshiMapper198ChrRam = { chrRam, slots, registers, chrRamTiles };
 }
 
 function installMapper198PrgProtocol(mapper, mapperState) {
