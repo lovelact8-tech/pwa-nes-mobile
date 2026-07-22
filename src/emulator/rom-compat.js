@@ -7,11 +7,17 @@ const TUNSHI_ROM_SIZE = 655376;
 const TUNSHI_1M_ROM_SIZE = 1048592;
 const TUNSHI_640K_FNV1A = 0x9a9b363e;
 const TUNSHI_1M_FNV1A = 0xe57ff021;
+const MAPPER198_COMPAT_MARKER_OFFSET = 8;
+const MAPPER198_COMPAT_MARKER = Object.freeze([0x4d, 0x31, 0x39, 0x38]); // M198
 const EXPANSION_RAM_START = 0x5000;
 const EXPANSION_RAM_END = 0x5fff;
 const CHR_RAM_BYTES = 0x2000;
 const CHR_BANK_BYTES = 0x0400;
 const CHR_BANK_COUNT = CHR_RAM_BYTES / CHR_BANK_BYTES;
+const EXTENSION_REGISTER_A = 0x5ff0;
+const EXTENSION_REGISTER_B = 0x5ff1;
+const EXTENSION_UNLOCK_A = 0x4d;
+const EXTENSION_UNLOCK_B = 0x98;
 
 function byteAt(romData, offset) {
   if (typeof romData === 'string') return romData.charCodeAt(offset) & 0xff;
@@ -57,11 +63,25 @@ export function isKnownTunshi1mRom(romData) {
   }) && fnv1a32(romData) === TUNSHI_1M_FNV1A;
 }
 
+export function hasMapper198CompatibilityMarker(romData) {
+  const prgBanks = byteAt(romData, 4) || 0;
+  const expectedLength = 16 + prgBanks * 0x4000;
+  return hasExpectedInesLayout(romData, {
+    length: expectedLength,
+    prgBanks,
+  }) && MAPPER198_COMPAT_MARKER.every((value, index) => (
+    byteAt(romData, MAPPER198_COMPAT_MARKER_OFFSET + index) === value
+  ));
+}
+
 export function isMmc3ChrRamExpansionRom(romData) {
-  return isKnownTunshi640kRom(romData)
+  return hasMapper198CompatibilityMarker(romData)
+    || isKnownTunshi640kRom(romData)
     || isKnownTunshi1mRom(romData)
     || isKnownTunshiPostgameRom(romData);
 }
+
+export const mapper198CompatibilityMarker = MAPPER198_COMPAT_MARKER;
 
 // FCEUX Mapper 198 wiring: values $50-$FF keep only the $40 and low nibble
 // lines, while $00-$4F pass through unchanged.
@@ -178,6 +198,43 @@ function installMapper198ChrRam(nes, mapper, mapperState) {
   mapper.__tunshiMapper198ChrRam = { chrRam, slots, registers };
 }
 
+function installMapper198PrgProtocol(mapper, mapperState) {
+  if (mapper.__mapper198PrgProtocol || typeof mapper.load8kRomBank !== 'function') return;
+  let extensionBanks = Boolean(mapperState?.__mapper198PrgProtocol?.extensionBanks);
+  let registerA = 0;
+  const rawLoad8kRomBank = mapper.load8kRomBank.bind(mapper);
+  mapper.load8kRomBank = (bank, address) => rawLoad8kRomBank(
+    extensionBanks ? bank : normalizeTunshiMapper198PrgBank(bank),
+    address,
+  );
+
+  const originalWrite = mapper.write.bind(mapper);
+  mapper.write = (address, value) => {
+    const normalizedAddress = address & 0xffff;
+    const normalizedValue = value & 0xff;
+    originalWrite(address, value);
+    if (normalizedAddress === EXTENSION_REGISTER_A) registerA = normalizedValue;
+    if (normalizedAddress === EXTENSION_REGISTER_B) {
+      if (registerA === EXTENSION_UNLOCK_A && normalizedValue === EXTENSION_UNLOCK_B) {
+        extensionBanks = true;
+      } else if (registerA === 0 && normalizedValue === 0) {
+        extensionBanks = false;
+      }
+      registerA = 0;
+    }
+  };
+
+  const originalToJSON = mapper.toJSON.bind(mapper);
+  mapper.toJSON = () => {
+    const state = originalToJSON();
+    state.__mapper198PrgProtocol = { extensionBanks };
+    return state;
+  };
+  mapper.__mapper198PrgProtocol = {
+    get extensionBanks() { return extensionBanks; },
+  };
+}
+
 export function installRomCompatibility(nes, romData, { mapperState } = {}) {
   if (!isMmc3ChrRamExpansionRom(romData)) return false;
   const mapper = nes?.mmap;
@@ -197,7 +254,12 @@ export function installRomCompatibility(nes, romData, { mapperState } = {}) {
 
   installMapper198ChrRam(nes, mapper, mapperState);
 
-  if ((isKnownTunshi640kRom(romData) || isKnownTunshi1mRom(romData))
+  if (hasMapper198CompatibilityMarker(romData)) {
+    installMapper198PrgProtocol(mapper, mapperState);
+  }
+
+  if ((isKnownTunshi640kRom(romData)
+      || isKnownTunshi1mRom(romData))
       && !mapper.__tunshiMapper198Prg
       && typeof mapper.load8kRomBank === 'function') {
     const originalLoad8kRomBank = mapper.load8kRomBank.bind(mapper);
@@ -206,28 +268,20 @@ export function installRomCompatibility(nes, romData, { mapperState } = {}) {
       address,
     );
     mapper.__tunshiMapper198Prg = true;
-    if (!mapperState) {
-      const fixedBankAddress = mapper.prgAddressSelect ? 0x8000 : 0xc000;
-      mapper.load8kRomBank(0xfe, fixedBankAddress);
-      mapper.load8kRomBank(0xff, 0xe000);
-    }
   }
 
   if (isKnownTunshiPostgameRom(romData)
+      && !hasMapper198CompatibilityMarker(romData)
       && !mapper.__tunshiPostgameBankAlias
       && typeof mapper.load8kRomBank === 'function') {
     const originalLoad8kRomBank = mapper.load8kRomBank.bind(mapper);
     mapper.__tunshiPostgameExtensionBanks = false;
+    mapper.__tunshiPostgameRawLoad8kRomBank = originalLoad8kRomBank;
     mapper.load8kRomBank = (bank, address) => originalLoad8kRomBank(
       mapper.__tunshiPostgameExtensionBanks ? bank : normalizeTunshiMapper198PrgBank(bank),
       address,
     );
     mapper.__tunshiPostgameBankAlias = true;
-    if (!mapperState) {
-      const fixedBankAddress = mapper.prgAddressSelect ? 0x8000 : 0xc000;
-      mapper.load8kRomBank(0xfe, fixedBankAddress);
-      mapper.load8kRomBank(0xff, 0xe000);
-    }
   }
   return true;
 }
@@ -238,13 +292,14 @@ export function setTunshiPostgameExtensionBanks(nes, enabled) {
   const next = Boolean(enabled);
   if (mapper.__tunshiPostgameExtensionBanks === next) return true;
   mapper.__tunshiPostgameExtensionBanks = next;
-  // $FE is MMC3's hard-wired 8 KiB bank. Switching between the stock
-  // Mapper-198 aliases and the private extension pair changes its physical
-  // meaning too, so both fixed banks must be remapped atomically. Leaving
-  // $C000 on normalized bank $4E makes the epilogue jump into table data and
-  // produces the familiar gray screen while audio continues to run.
+  // MMC3's two fixed slots are physical last banks. They are not values sent
+  // through the switchable PRG register, so Mapper 198's $50-$FF alias mask
+  // must never be applied to them. Doing so maps a 1/2 MiB ROM's reset/title
+  // code to $4E/$4F and causes the familiar gray screen while audio continues.
   const fixedBankAddress = mapper.prgAddressSelect ? 0x8000 : 0xc000;
-  mapper.load8kRomBank(0xfe, fixedBankAddress);
-  mapper.load8kRomBank(0xff, 0xe000);
+  const rawLoad8kRomBank = mapper.__tunshiPostgameRawLoad8kRomBank
+    || mapper.load8kRomBank.bind(mapper);
+  rawLoad8kRomBank(next ? 0xfe : 0x7e, fixedBankAddress);
+  rawLoad8kRomBank(next ? 0xff : 0x7f, 0xe000);
   return true;
 }

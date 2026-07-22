@@ -76,6 +76,10 @@ function mapperFromHeader(romData) {
 export function getTunshiPostgameRomLayout(romData) {
   const length = romData?.byteLength ?? romData?.length ?? 0;
   if (!bytesAt(romData, 0, [0x4e, 0x45, 0x53, 0x1a])) return null;
+  // M198-marked cartridges own their complete title/start/save flow. They use
+  // only the generic mapper compatibility protocol and must never be coupled
+  // to the legacy web checkpoint/runtime adapter below.
+  if (bytesAt(romData, 8, [0x4d, 0x31, 0x39, 0x38])) return null;
   if (byteAt(romData, 5) !== 0 || mapperFromHeader(romData) !== MAPPER_MMC3) return null;
 
   const layout = POSTGAME_LAYOUTS.find((candidate) => (
